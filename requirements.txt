@@ -1,0 +1,9 @@
+# core
+openai
+pydantic
+pyyaml
+python-dotenv
+pytest
+
+# optional (step 10, x402 budget-gated provider):
+#   pip install "x402[httpx,evm,svm]"

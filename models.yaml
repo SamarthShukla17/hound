@@ -1,0 +1,104 @@
+# Model IDs, free tiers, and prices change often — verify each one on its provider's
+# page before relying on it. This file is a starting point, not a guarantee.
+
+providers:
+  ollama:
+    base_url: http://localhost:11434/v1
+    local: true
+    key_env: null
+    rpm: 6000
+    concurrency: 4
+    timeout: 300
+
+  zai:
+    base_url: https://api.z.ai/api/paas/v4
+    key_env: ZAI_API_KEY
+    rpm: 60
+    concurrency: 4
+    timeout: 120
+
+  openrouter:
+    base_url: https://openrouter.ai/api/v1
+    key_env: OPENROUTER_API_KEY
+    rpm: 20
+    concurrency: 4
+    timeout: 120
+
+  openai:
+    base_url: https://api.openai.com/v1
+    key_env: OPENAI_API_KEY
+    rpm: 60
+    concurrency: 4
+    timeout: 120
+
+  xai:
+    base_url: https://api.x.ai/v1
+    key_env: XAI_API_KEY
+    rpm: 60
+    concurrency: 4
+    timeout: 120
+
+  anthropic:
+    base_url: https://api.anthropic.com/v1/
+    key_env: ANTHROPIC_API_KEY
+    rpm: 60
+    concurrency: 4
+    timeout: 120
+
+  x402gw:
+    type: x402
+    base_url: https://PLACEHOLDER.x402-gateway.example/v1  # TODO: real gateway base_url, testnet first
+    key_env: null  # x402 pays with a wallet key (X402_SVM_KEY / X402_EVM_KEY), not a bearer token
+    rpm: 30
+    concurrency: 2
+    timeout: 120
+
+roles:
+  # Free/local first: try Ollama before spending money.
+  mapper:
+    - {provider: ollama, model: qwen3-coder:30b}
+    - {provider: ollama, model: gpt-oss:20b}
+    - {provider: openrouter, model: qwen/qwen-2.5-72b-instruct:free}
+    - {provider: zai, model: glm-4-flash}
+
+  hunter:
+    - {provider: ollama, model: qwen3-coder:30b}
+    - {provider: ollama, model: gpt-oss:20b}
+    - {provider: openrouter, model: qwen/qwen-2.5-72b-instruct:free}
+    - {provider: zai, model: glm-4-flash}
+
+  # Cheapest strong model first.
+  judge:
+    - {provider: zai, model: glm-4-plus}
+    - {provider: openrouter, model: deepseek/deepseek-chat}
+    - {provider: openai, model: gpt-4o-mini}
+
+  # A different model family than judge, for an independent second opinion.
+  judge2:
+    - {provider: anthropic, model: claude-haiku-4-5-20251001}
+    - {provider: xai, model: grok-4-fast}
+
+  poc:
+    - {provider: zai, model: glm-4-plus}
+    - {provider: openai, model: gpt-4o}
+
+  scorer:
+    - {provider: openai, model: gpt-4o-mini}
+    - {provider: zai, model: glm-4-flash}
+
+# $ per million tokens: [input, output]. Approximate — verify before trusting cost reports.
+prices:
+  qwen3-coder:30b: [0, 0]
+  gpt-oss:20b: [0, 0]
+  qwen/qwen-2.5-72b-instruct:free: [0, 0]
+  glm-4-flash: [0, 0]
+  glm-4-plus: [0.5, 1.5]
+  deepseek/deepseek-chat: [0.28, 0.42]
+  gpt-4o-mini: [0.15, 0.6]
+  gpt-4o: [2.5, 10]
+  claude-haiku-4-5-20251001: [1, 5]
+  grok-4-fast: [0.2, 0.5]
+
+budget:
+  monthly_usd: 20
+  reserve_usd: 0.5
