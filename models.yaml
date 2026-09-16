@@ -1,5 +1,6 @@
 # Model IDs, free tiers, and prices change often — verify each one on its provider's
 # page before relying on it. This file is a starting point, not a guarantee.
+# Last checked 2026-09-16.
 
 providers:
   ollama:
@@ -54,50 +55,50 @@ providers:
     timeout: 120
 
 roles:
-  # Free/local first: try Ollama before spending money.
+  # Free/local first: try the free zai tier, then Ollama, then OpenRouter's free pool
+  # (which routes to a random underlying model, so it's a last resort, not a first choice).
   mapper:
+    - {provider: zai, model: glm-4.7-flash}
     - {provider: ollama, model: qwen3-coder:30b}
-    - {provider: ollama, model: gpt-oss:20b}
-    - {provider: openrouter, model: qwen/qwen-2.5-72b-instruct:free}
-    - {provider: zai, model: glm-4-flash}
+    - {provider: openrouter, model: openrouter/free}
 
   hunter:
+    - {provider: zai, model: glm-4.7-flash}
     - {provider: ollama, model: qwen3-coder:30b}
-    - {provider: ollama, model: gpt-oss:20b}
-    - {provider: openrouter, model: qwen/qwen-2.5-72b-instruct:free}
-    - {provider: zai, model: glm-4-flash}
+    - {provider: openrouter, model: openrouter/free}
 
   # Cheapest strong model first.
   judge:
-    - {provider: zai, model: glm-4-plus}
-    - {provider: openrouter, model: deepseek/deepseek-chat}
-    - {provider: openai, model: gpt-4o-mini}
+    - {provider: openrouter, model: z-ai/glm-5.3-flash}
+    - {provider: openai, model: gpt-5.6-luna, extra: {reasoning_effort: high}}
+    - {provider: zai, model: glm-5.3-flash}
+    - {provider: anthropic, model: claude-sonnet-5}
 
   # A different model family than judge, for an independent second opinion.
   judge2:
-    - {provider: anthropic, model: claude-haiku-4-5-20251001}
-    - {provider: xai, model: grok-4-fast}
+    - {provider: xai, model: grok-4.6}
+    - {provider: ollama, model: gpt-oss:20b}
 
   poc:
-    - {provider: zai, model: glm-4-plus}
-    - {provider: openai, model: gpt-4o}
+    - {provider: zai, model: glm-4.7-flash}
+    - {provider: ollama, model: qwen3-coder:30b}
 
   scorer:
-    - {provider: openai, model: gpt-4o-mini}
-    - {provider: zai, model: glm-4-flash}
+    - {provider: openrouter, model: z-ai/glm-5.3-flash}
+    - {provider: zai, model: glm-4.7-flash}
+    - {provider: ollama, model: gpt-oss:20b}
 
 # $ per million tokens: [input, output]. Approximate — verify before trusting cost reports.
 prices:
   qwen3-coder:30b: [0, 0]
   gpt-oss:20b: [0, 0]
-  qwen/qwen-2.5-72b-instruct:free: [0, 0]
-  glm-4-flash: [0, 0]
-  glm-4-plus: [0.5, 1.5]
-  deepseek/deepseek-chat: [0.28, 0.42]
-  gpt-4o-mini: [0.15, 0.6]
-  gpt-4o: [2.5, 10]
-  claude-haiku-4-5-20251001: [1, 5]
-  grok-4-fast: [0.2, 0.5]
+  openrouter/free: [0, 0]
+  glm-4.7-flash: [0, 0]
+  z-ai/glm-5.3-flash: [0.05, 0.17]
+  glm-5.3-flash: [0.05, 0.17]  # same underlying model as z-ai/glm-5.3-flash, routed via zai directly
+  gpt-5.6-luna: [0.20, 1.20]
+  grok-4.6: [2.0, 6.0]
+  claude-sonnet-5: [3.0, 15.0]
 
 budget:
   monthly_usd: 20
