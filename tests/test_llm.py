@@ -2,9 +2,9 @@
 
 import asyncio
 import textwrap
+from types import SimpleNamespace
 
 import pytest
-import yaml
 
 from hound.llm import Provider, Router, cache_key, extract_json
 
@@ -111,3 +111,50 @@ def test_extract_json_with_surrounding_prose():
 
 def test_extract_json_returns_none_on_garbage():
     assert extract_json("no json here at all") is None
+
+
+class FakeAPIError(Exception):
+    def __init__(self, status_code, message):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+def _fake_response(content):
+    return SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content=content))],
+        usage=None,
+    )
+
+
+def test_400_mentioning_temperature_retries_once_without_it(models_yaml, monkeypatch):
+    router = Router(models_path=str(models_yaml))
+    calls = []
+
+    async def fake_complete(self, *, model, messages, temperature, max_tokens, extra=None):
+        calls.append(temperature)
+        if temperature is not None:
+            raise FakeAPIError(400, "Unsupported value: 'temperature' is not supported")
+        return _fake_response("ok without temperature")
+
+    monkeypatch.setattr(Provider, "complete", fake_complete)
+
+    result = asyncio.run(router.chat("test_role", "sys", "hello", temperature=0.3))
+
+    assert result == "ok without temperature"
+    assert calls == [0.3, None]
+
+
+def test_404_prints_model_not_found_warning(models_yaml, monkeypatch, capsys):
+    router = Router(models_path=str(models_yaml))
+
+    async def fake_complete(self, **kwargs):
+        raise FakeAPIError(404, "no such model")
+
+    monkeypatch.setattr(Provider, "complete", fake_complete)
+
+    with pytest.raises(RuntimeError):
+        asyncio.run(router.chat("test_role", "sys", "hello", temperature=0.3))
+
+    out = capsys.readouterr().out
+    assert "MODEL NOT FOUND: enabled_provider/enabled-model" in out
+    assert "check the model id in models.yaml" in out

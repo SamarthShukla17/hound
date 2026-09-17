@@ -70,9 +70,17 @@ class Provider:
                 http_client=None,
             )
 
-        self._semaphore = asyncio.Semaphore(cfg.get("concurrency", 1))
-        self._rpm_lock = asyncio.Lock()
+        # Created lazily on first use (inside a running loop), not here: Router is
+        # built synchronously by the CLI before any event loop exists.
+        self._semaphore = None
+        self._rpm_lock = None
         self._next_allowed = 0.0
+
+    def _ensure_sync_primitives(self):
+        if self._semaphore is None:
+            self._semaphore = asyncio.Semaphore(self.cfg.get("concurrency", 1))
+        if self._rpm_lock is None:
+            self._rpm_lock = asyncio.Lock()
 
     def _compute_enabled(self) -> bool:
         if self.cfg.get("type") == "x402":
@@ -87,6 +95,7 @@ class Provider:
         return bool(os.environ.get(key_env))
 
     async def _throttle(self):
+        self._ensure_sync_primitives()
         rpm = self.cfg.get("rpm")
         if not rpm:
             return
@@ -99,6 +108,7 @@ class Provider:
             await asyncio.sleep(wait)
 
     async def complete(self, *, model, messages, temperature, max_tokens, extra=None):
+        self._ensure_sync_primitives()
         async with self._semaphore:
             await self._throttle()
             kwargs = dict(model=model, messages=messages, max_tokens=max_tokens)
@@ -206,6 +216,12 @@ class Router:
                     cur_temperature = None
                     retried_without_temperature = True
                     continue
+
+                if status == 404:
+                    print(
+                        f"[llm] MODEL NOT FOUND: {provider.name}/{model}, "
+                        f"check the model id in models.yaml"
+                    )
 
                 if status in TERMINAL_STATUS_CODES or "budget" in message.lower():
                     break
