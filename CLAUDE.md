@@ -30,3 +30,7 @@ lens text** — lenses are parsed out of the kb files at runtime, not embedded i
 - `reference/` (the unzipped `hound.zip`) was not provided when this project was scaffolded,
   so it does not exist yet in this repo. If it's added later, treat it as read-only per the
   rule above.
+- Target is Python 3.11+, but this machine only has Python 3.9.6 (no 3.11+, no Homebrew
+  Python, no pyenv), so `.venv` currently runs 3.9. Code is kept 3.9-compatible in the
+  meantime (e.g. no eager `asyncio.Semaphore()`/`asyncio.Lock()` construction outside a
+  running loop). Rebuild `.venv` on 3.11+ once one is available on this machine.
