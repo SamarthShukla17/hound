@@ -2,20 +2,12 @@
 # page before relying on it. This file is a starting point, not a guarantee.
 # Last checked 2026-09-16.
 
-providers:
-  ollama:
-    # Measured on a 16 GB M5 Air: Metal only exposes ~11.8 GiB, and weights + KV
-    # cache + macOS itself all have to fit in that. ~5 GB of weights is the
-    # practical ceiling (qwen2.5-coder:7b) — a 14B-class model spills partially
-    # to CPU and drops ~300x in throughput (0.09 tok/s vs 28 tok/s measured).
-    # Local mode is the NDA fallback and judge2, not the daily driver.
-    base_url: http://localhost:11434/v1
-    local: true
-    key_env: null
-    rpm: 6000
-    concurrency: 4
-    timeout: 300
+# hound is cloud-only. Local mode (Ollama) was removed after measuring 0.09 tok/s for a
+# 14B-class model and 28 tok/s for 7B on a 16 GB M5 Air — Metal only exposes ~11.8 GiB there,
+# and a 7B model is too weak to hunt or judge usefully anyway. --local-only now fails fast
+# with that explanation instead of silently routing to a model that can't do the job.
 
+providers:
   zai:
     base_url: https://api.z.ai/api/paas/v4
     key_env: ZAI_API_KEY
@@ -60,49 +52,41 @@ providers:
     timeout: 120
 
 roles:
-  # Free/local first: try the free zai tier, then Ollama, then OpenRouter's free pool
-  # (which routes to a random underlying model, so it's a last resort, not a first choice).
+  # Free first: the free zai tier, then OpenRouter's free pool as a last resort
+  # (it routes to a random underlying model, so it's never a first choice).
   mapper:
     - {provider: zai, model: glm-4.7-flash}
-    - {provider: ollama, model: qwen2.5-coder:7b}
     - {provider: openrouter, model: openrouter/free}
 
   hunter:
     - {provider: zai, model: glm-4.7-flash}
-    - {provider: ollama, model: qwen2.5-coder:7b}
     - {provider: openrouter, model: openrouter/free}
 
   # Cheapest strong model first.
   judge:
     - {provider: openrouter, model: z-ai/glm-5.3-flash}
     - {provider: openai, model: gpt-5.6-luna, extra: {reasoning_effort: high}}
-    - {provider: zai, model: glm-5.3-flash}
-    - {provider: anthropic, model: claude-sonnet-5}
 
-  # A different model family than judge, for an independent second opinion.
+  # A different model family than judge, for an independent second opinion. Only
+  # runs on candidates that already survived judge, so the call count is small.
   judge2:
     - {provider: xai, model: grok-4.6}
-    - {provider: ollama, model: qwen2.5-coder:7b}
 
   poc:
     - {provider: zai, model: glm-4.7-flash}
-    - {provider: ollama, model: qwen2.5-coder:7b}
+    - {provider: openrouter, model: openrouter/free}
 
   scorer:
     - {provider: openrouter, model: z-ai/glm-5.3-flash}
     - {provider: zai, model: glm-4.7-flash}
-    - {provider: ollama, model: qwen2.5-coder:7b}
 
 # $ per million tokens: [input, output]. Approximate — verify before trusting cost reports.
 prices:
-  qwen2.5-coder:7b: [0, 0]
   openrouter/free: [0, 0]
   glm-4.7-flash: [0, 0]
   z-ai/glm-5.3-flash: [0.05, 0.17]
-  glm-5.3-flash: [0.05, 0.17]  # same underlying model as z-ai/glm-5.3-flash, routed via zai directly
   gpt-5.6-luna: [0.20, 1.20]
   grok-4.6: [2.0, 6.0]
-  claude-sonnet-5: [3.0, 15.0]
 
 budget:
   monthly_usd: 20

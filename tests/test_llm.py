@@ -67,6 +67,30 @@ def test_local_only_filters_non_local_providers(models_yaml):
     assert [t["provider"] for t, _ in targets] == ["local_provider"]
 
 
+def test_local_only_fails_fast_when_no_provider_is_local(tmp_path, monkeypatch):
+    monkeypatch.setenv("TEST_KEY_PRESENT", "secret")
+    path = tmp_path / "models.yaml"
+    path.write_text(
+        textwrap.dedent(
+            """
+            providers:
+              enabled_provider:
+                base_url: http://example.invalid/v1
+                key_env: TEST_KEY_PRESENT
+                rpm: 6000
+                concurrency: 2
+                timeout: 5
+            roles:
+              test_role:
+                - {provider: enabled_provider, model: enabled-model}
+            prices: {}
+            """
+        )
+    )
+    with pytest.raises(RuntimeError, match="no local provider configured"):
+        Router(models_path=str(path), local_only=True)
+
+
 def test_targets_raises_when_nothing_is_enabled(models_yaml, monkeypatch):
     monkeypatch.delenv("TEST_KEY_PRESENT", raising=False)
     router = Router(models_path=str(models_yaml))

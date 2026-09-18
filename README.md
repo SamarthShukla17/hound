@@ -1,27 +1,28 @@
 # hound
 
-## Local mode, 16 GB Apple silicon
+## Cloud-only
 
-Local mode (`--local-only`) is the NDA fallback and judge2's second opinion, not the daily
-driver — a 16 GB Mac has real ceilings here (see `models.yaml`'s comment on the Ollama
-provider for the measured numbers).
+hound has no offline/local mode. Local mode (Ollama) was tried and removed: on a 16 GB Mac,
+a 14B-class model spills out of Metal's ~11.8 GiB budget and drops to 0.09 tok/s (vs 28 tok/s
+for a 7B model that fits) — and a 7B model is too weak to hunt or judge usefully anyway.
+Rather than ship a local mode that quietly produces worse audits, it was removed. `--local-only`
+now fails immediately with that explanation instead of silently routing to a model that can't
+do the job.
 
-**Start the server with an explicit context length, before `ollama serve` runs:**
+**Routing (see `models.yaml`):**
+- **mapper / hunter / poc** (the 20-lens fan-out, run over every chunk): free GLM Flash
+  (`zai`), falling back to OpenRouter's free pool.
+- **judge**: cheap GLM-5.3-Flash, falling back to GPT with high reasoning effort.
+- **judge2**: Grok 4.6 — a different model family from the judge, on purpose, for an
+  independent second opinion. It only runs on candidates that already survived judge, so the
+  call count stays small.
 
-```bash
-OLLAMA_CONTEXT_LENGTH=16384 OLLAMA_KEEP_ALIVE=30m OLLAMA_FLASH_ATTENTION=1 OLLAMA_KV_CACHE_TYPE=q8_0 ollama serve
-```
+**Budget:** `--budget 240000` (chars per chunk) matches these models' ~128K context.
 
-Context has to be set before `serve` starts — it can't be changed per-request. Ollama's
-default context is 4096 tokens, and it truncates silently past that: the hunter ends up
-being told to cite lines that were never actually in what it saw, and every citation fails
-the citation gate for a reason that looks like a model problem but is actually a config one.
+## Known limitation
 
-**Sizing for 16 GB:** `qwen2.5-coder:7b` at `OLLAMA_CONTEXT_LENGTH=16384` pairs with
-`--budget 40000`. After starting a scan, check `ollama ps` — it should show 100% GPU.
-Anything like `27%/73% CPU/GPU` means the model spilled out of Metal's ~11.8 GiB budget and
-partially offloaded to CPU; the scan will take hours instead of minutes.
-
-**The general rule, always:** `--budget` (in characters) must stay `<= context_tokens * 2.5`.
-Going over this means the prompt gets silently truncated by Ollama before the model ever
-sees it — same failure mode as an unset context length, just from the other side.
+**No offline mode.** Every scan sends code to a cloud API (zai, OpenRouter, OpenAI, or xAI,
+per `models.yaml`). Code under NDA or a bounty program's confidentiality clause cannot be
+scanned with hound as currently configured — there is no local fallback that's actually
+capable of doing the job. Public contest code, where sending it to a well-known API provider
+carries no additional exposure, is fine.

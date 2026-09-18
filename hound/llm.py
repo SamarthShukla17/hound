@@ -142,6 +142,12 @@ class Router:
             for name, cfg in config["providers"].items()
         }
 
+        if local_only and not any(p.cfg.get("local") for p in self.providers.values()):
+            raise RuntimeError(
+                "no local provider configured; local mode was removed after measuring "
+                "0.09 tok/s on this machine."
+            )
+
         self.cache_dir = Path(".hound_cache")
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.usage: dict[str, dict[str, int]] = {}
