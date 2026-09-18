@@ -4,6 +4,11 @@
 
 providers:
   ollama:
+    # Measured on a 16 GB M5 Air: Metal only exposes ~11.8 GiB, and weights + KV
+    # cache + macOS itself all have to fit in that. ~5 GB of weights is the
+    # practical ceiling (qwen2.5-coder:7b) — a 14B-class model spills partially
+    # to CPU and drops ~300x in throughput (0.09 tok/s vs 28 tok/s measured).
+    # Local mode is the NDA fallback and judge2, not the daily driver.
     base_url: http://localhost:11434/v1
     local: true
     key_env: null
@@ -59,12 +64,12 @@ roles:
   # (which routes to a random underlying model, so it's a last resort, not a first choice).
   mapper:
     - {provider: zai, model: glm-4.7-flash}
-    - {provider: ollama, model: qwen3-coder:30b}
+    - {provider: ollama, model: qwen2.5-coder:7b}
     - {provider: openrouter, model: openrouter/free}
 
   hunter:
     - {provider: zai, model: glm-4.7-flash}
-    - {provider: ollama, model: qwen3-coder:30b}
+    - {provider: ollama, model: qwen2.5-coder:7b}
     - {provider: openrouter, model: openrouter/free}
 
   # Cheapest strong model first.
@@ -77,21 +82,20 @@ roles:
   # A different model family than judge, for an independent second opinion.
   judge2:
     - {provider: xai, model: grok-4.6}
-    - {provider: ollama, model: gpt-oss:20b}
+    - {provider: ollama, model: qwen2.5-coder:7b}
 
   poc:
     - {provider: zai, model: glm-4.7-flash}
-    - {provider: ollama, model: qwen3-coder:30b}
+    - {provider: ollama, model: qwen2.5-coder:7b}
 
   scorer:
     - {provider: openrouter, model: z-ai/glm-5.3-flash}
     - {provider: zai, model: glm-4.7-flash}
-    - {provider: ollama, model: gpt-oss:20b}
+    - {provider: ollama, model: qwen2.5-coder:7b}
 
 # $ per million tokens: [input, output]. Approximate — verify before trusting cost reports.
 prices:
-  qwen3-coder:30b: [0, 0]
-  gpt-oss:20b: [0, 0]
+  qwen2.5-coder:7b: [0, 0]
   openrouter/free: [0, 0]
   glm-4.7-flash: [0, 0]
   z-ai/glm-5.3-flash: [0.05, 0.17]

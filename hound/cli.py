@@ -1,7 +1,7 @@
 """Command-line interface.
 
 Remaining subcommands are stubbed here and get real bodies in later steps:
-check (9), budget (10), coach (11), run-pocs (12).
+budget (10), coach (11), run-pocs (12).
 """
 
 import argparse
@@ -38,6 +38,12 @@ def _cmd_kill(args: argparse.Namespace) -> int:
         return 1
     print(f"appended to corpus: {entry['title']} @ {entry['location']}")
     return 0
+
+
+def _cmd_check(args: argparse.Namespace) -> int:
+    from .llm import check
+
+    return asyncio.run(check(args))
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -82,7 +88,8 @@ def build_parser() -> argparse.ArgumentParser:
     kill.set_defaults(handler=_cmd_kill)
 
     check = sub.add_parser("check", help="ping each role's first fallback target")
-    check.set_defaults(handler=_not_implemented("check"))
+    check.add_argument("--paid", action="store_true", help="also probe x402 providers (spends real money)")
+    check.set_defaults(handler=_cmd_check)
 
     coach = sub.add_parser("coach", help="ask guided questions about a target, no verdicts")
     coach.set_defaults(handler=_not_implemented("coach"))

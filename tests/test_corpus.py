@@ -1,15 +1,52 @@
-"""Step 8: the human-confirmed false-positive corpus."""
+"""Step 8/9: the human-confirmed false-positive corpus."""
 
 import json
+from pathlib import Path
 
 import pytest
 
-from hound.corpus import append, kill_finding, recent
+from hound.corpus import append, default_path, kill_finding, recent
 
 
 @pytest.fixture
 def corpus_path(tmp_path):
     return tmp_path / "corpus" / "killed.jsonl"
+
+
+def test_default_path_lives_under_home_not_the_cwd(monkeypatch):
+    monkeypatch.delenv("HOUND_CORPUS", raising=False)
+    assert default_path() == Path.home() / ".hound" / "killed.jsonl"
+
+
+def test_default_path_honors_hound_corpus_override(tmp_path, monkeypatch):
+    override = tmp_path / "elsewhere" / "killed.jsonl"
+    monkeypatch.setenv("HOUND_CORPUS", str(override))
+    assert default_path() == override
+
+
+def test_append_and_recent_use_the_resolved_default_path(tmp_path, monkeypatch):
+    override = tmp_path / "killed.jsonl"
+    monkeypatch.setenv("HOUND_CORPUS", str(override))
+
+    append({"title": "t", "location": "l", "root_cause": "r", "reason": "reason"})
+
+    assert override.exists()
+    assert "killed by reason" in recent()
+
+
+def test_corpus_is_one_file_regardless_of_invocation_directory(tmp_path, monkeypatch):
+    override = tmp_path / "killed.jsonl"
+    monkeypatch.setenv("HOUND_CORPUS", str(override))
+
+    other_cwd = tmp_path / "some" / "other" / "project"
+    other_cwd.mkdir(parents=True)
+    monkeypatch.chdir(other_cwd)
+
+    append({"title": "t", "location": "l", "root_cause": "r", "reason": "reason"})
+
+    # written to HOUND_CORPUS, not to ./corpus/killed.jsonl under the cwd
+    assert override.exists()
+    assert not (other_cwd / "corpus").exists()
 
 
 def test_empty_corpus_renders_empty_string(corpus_path):

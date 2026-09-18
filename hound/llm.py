@@ -320,3 +320,74 @@ class Router:
         if self.budget is not None:
             result["x402_month_to_date_usd"] = self.budget.spent()
         return result
+
+
+def _first_usable_target(router: Router, targets: list, paid: bool):
+    """The first target in `targets` that check() should actually probe —
+    same filtering as Router.targets(), but stops at the first match instead
+    of collecting the whole fallback chain, since check() pings only the
+    first target: a live second target must never mask a dead first one."""
+    for target in targets:
+        provider = router.providers[target["provider"]]
+        if not provider.enabled:
+            continue
+        if router.local_only and not provider.cfg.get("local"):
+            continue
+        if provider.cfg.get("type") == "x402" and not paid:
+            continue
+        return target, provider
+    return None
+
+
+def _missing_key_hint(router: Router, targets: list) -> str:
+    missing_keys = []
+    for target in targets:
+        provider = router.providers[target["provider"]]
+        if provider.enabled:
+            continue
+        key_env = provider.cfg.get("key_env")
+        if key_env and key_env not in missing_keys:
+            missing_keys.append(key_env)
+    if missing_keys:
+        return f"missing: {', '.join(missing_keys)}"
+    return "filtered out by --local-only or --paid"
+
+
+async def check(args) -> int:
+    """Ping the first usable target of every role with a trivial prompt.
+
+    Bypasses Router.chat()'s cache and multi-target fallback on purpose: a
+    cached reply or a working second target could make a dead first-choice
+    endpoint look alive.
+    """
+    router = Router(models_path=args.models, local_only=args.local_only, fresh=True)
+    paid = getattr(args, "paid", False)
+
+    all_ok = True
+    for role, targets in router.roles.items():
+        found = _first_usable_target(router, targets, paid)
+        if found is None:
+            print(f"{role}: no usable target ({_missing_key_hint(router, targets)})")
+            all_ok = False
+            continue
+
+        target, provider = found
+        label = f"{target['provider']}/{target['model']}"
+        try:
+            response = await provider.complete(
+                model=target["model"],
+                messages=[
+                    {"role": "system", "content": "Reply with one word."},
+                    {"role": "user", "content": "Say: ready"},
+                ],
+                temperature=0.0,
+                max_tokens=10,
+                extra=target.get("extra"),
+            )
+            reply = strip_think(response.choices[0].message.content or "")
+            print(f"{role}: {label}: {reply[:40]!r}")
+        except Exception as exc:  # noqa: BLE001 - report and keep checking other roles
+            print(f"{role}: {label}: FAILED: {str(exc)[:40]}")
+            all_ok = False
+
+    return 0 if all_ok else 1
