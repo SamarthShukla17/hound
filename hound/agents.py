@@ -37,6 +37,15 @@ def system(kb) -> str:
     return "\n\n".join([ROLE_PROMPT, IMPACT_LADDER, kb.principles, EVIDENCE_RULES])
 
 
+def _map_block(pmap) -> str:
+    """pmap may be a dict (serialized here) or an already-formatted string
+    (e.g. pipeline.py's merged-and-truncated map text) — never double-encode."""
+    if not pmap:
+        return ""
+    text = pmap if isinstance(pmap, str) else json.dumps(pmap, sort_keys=True)
+    return f"MAP:\n{text}"
+
+
 def _user_prompt(*sections: str) -> str:
     """Join non-empty sections, stable content first, variable content last.
 
@@ -78,7 +87,7 @@ async def mapper(r, kb, code: str, notes: str = "") -> dict:
 async def hunter(r, kb, lens, code: str, pmap=None, known: str = "", killed: str = "", already=None, temp: float = 0.3):
     sys_prompt = system(kb)
 
-    map_block = f"MAP:\n{json.dumps(pmap, sort_keys=True)}" if pmap else ""
+    map_block = _map_block(pmap)
     known_block = f"KNOWN/ACKNOWLEDGED ISSUES:\n{known}" if known else ""
     killed_block = f"KILLED FALSE POSITIVES:\n{killed}" if killed else ""
     already_block = (
@@ -134,7 +143,7 @@ async def hunter(r, kb, lens, code: str, pmap=None, known: str = "", killed: str
 async def judge(r, kb, role: str, cand: dict, code: str, pmap=None, known: str = "", killed: str = "") -> Verdict:
     sys_prompt = system(kb)
 
-    map_block = f"MAP:\n{json.dumps(pmap, sort_keys=True)}" if pmap else ""
+    map_block = _map_block(pmap)
     known_block = f"KNOWN/ACKNOWLEDGED ISSUES:\n{known}" if known else ""
     killed_block = f"KILLED FALSE POSITIVES:\n{killed}" if killed else ""
     cand_block = (

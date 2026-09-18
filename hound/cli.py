@@ -1,10 +1,11 @@
 """Command-line interface.
 
-Subcommands are stubbed here now and get real bodies in later steps:
-scan (7), score/kill (8), check (9), budget (10), coach (11), run-pocs (12).
+Remaining subcommands are stubbed here and get real bodies in later steps:
+score/kill (8), check (9), budget (10), coach (11), run-pocs (12).
 """
 
 import argparse
+import asyncio
 
 
 def _not_implemented(name: str):
@@ -13,6 +14,12 @@ def _not_implemented(name: str):
         return 1
 
     return handler
+
+
+def _cmd_scan(args: argparse.Namespace) -> int:
+    from .pipeline import scan  # deferred: keeps --help fast for every other subcommand
+
+    return asyncio.run(scan(args))
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -25,7 +32,24 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command")
 
     scan = sub.add_parser("scan", help="audit a target codebase")
-    scan.set_defaults(handler=_not_implemented("scan"))
+    scan.add_argument("target", help="path to the target codebase")
+    scan.add_argument("--kb", default="kb", help="path to the kb/ directory (default: kb)")
+    scan.add_argument("--scope", default=None, help="scope file: one glob per line, # comments ignored")
+    scan.add_argument("--known", default=None, help="known/acknowledged issues file")
+    scan.add_argument("--notes", default=None, help="scope notes file (exclusions, trusted roles, token assumptions)")
+    scan.add_argument("--lenses", default="all", help='"all" | kinds "A,P" | ids "A1,P4" (default: all)')
+    scan.add_argument("--passes", type=int, default=2)
+    scan.add_argument("--budget", type=int, default=240_000, help="chars per chunk (default: 240000)")
+    scan.add_argument("--judge-budget", dest="judge_budget", type=int, default=120_000)
+    scan.add_argument("--map-cap", dest="map_cap", type=int, default=12_000)
+    scan.add_argument("--max-judge", dest="max_judge", type=int, default=40)
+    scan.add_argument("--temp", type=float, default=0.3)
+    scan.add_argument("--seed", type=int, default=0)
+    scan.add_argument("--fresh", action="store_true", help="bypass the disk cache on read")
+    scan.add_argument("--no-judge2", dest="no_judge2", action="store_true")
+    scan.add_argument("--dry-run", dest="dry_run", action="store_true")
+    scan.add_argument("--out", default="runs", help="output directory (default: runs)")
+    scan.set_defaults(handler=_cmd_scan)
 
     score = sub.add_parser("score", help="score a run against a ground-truth file")
     score.set_defaults(handler=_not_implemented("score"))
