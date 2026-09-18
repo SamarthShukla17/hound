@@ -1,7 +1,7 @@
 """Command-line interface.
 
 Remaining subcommands are stubbed here and get real bodies in later steps:
-score/kill (8), check (9), budget (10), coach (11), run-pocs (12).
+check (9), budget (10), coach (11), run-pocs (12).
 """
 
 import argparse
@@ -20,6 +20,24 @@ def _cmd_scan(args: argparse.Namespace) -> int:
     from .pipeline import scan  # deferred: keeps --help fast for every other subcommand
 
     return asyncio.run(scan(args))
+
+
+def _cmd_score(args: argparse.Namespace) -> int:
+    from .score import score
+
+    return asyncio.run(score(args))
+
+
+def _cmd_kill(args: argparse.Namespace) -> int:
+    from .corpus import kill_finding
+
+    try:
+        entry = kill_finding(args.run_dir, args.finding_id, args.reason)
+    except (FileNotFoundError, ValueError) as exc:
+        print(str(exc))
+        return 1
+    print(f"appended to corpus: {entry['title']} @ {entry['location']}")
+    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -52,10 +70,16 @@ def build_parser() -> argparse.ArgumentParser:
     scan.set_defaults(handler=_cmd_scan)
 
     score = sub.add_parser("score", help="score a run against a ground-truth file")
-    score.set_defaults(handler=_not_implemented("score"))
+    score.add_argument("run_dir")
+    score.add_argument("truth")
+    score.add_argument("--include-killed", dest="include_killed", action="store_true")
+    score.set_defaults(handler=_cmd_score)
 
     kill = sub.add_parser("kill", help="confirm a finding as a false positive")
-    kill.set_defaults(handler=_not_implemented("kill"))
+    kill.add_argument("run_dir")
+    kill.add_argument("finding_id")
+    kill.add_argument("reason")
+    kill.set_defaults(handler=_cmd_kill)
 
     check = sub.add_parser("check", help="ping each role's first fallback target")
     check.set_defaults(handler=_not_implemented("check"))

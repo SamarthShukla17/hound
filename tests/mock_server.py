@@ -1,12 +1,15 @@
 """Threaded stdlib HTTP mock of an OpenAI-compatible chat endpoint, for the
-step 7 integration test. No real network, no extra dependencies.
+step 7/8 integration tests. No real network, no extra dependencies.
 
 Dispatches on the last user message's content: "TASK: MAP" -> a small map,
 "TASK: HUNT" -> three canned findings (one valid against FIXTURE_LOCATION,
 one citing a path that doesn't exist, one malformed), "TASK: FALSIFY" -> a
-keep verdict, anything else -> PoC code. Every reply is wrapped in
+keep verdict, "TASK: SCORE" -> a fixed 3-EXACT/2-PARTIAL/5-MISS scoring
+payload, anything else -> PoC code. Every reply is wrapped in
 <think>...</think> (and, for the JSON tasks, ```json fences too) so the
 router's stripping and JSON extraction are exercised for real, not skipped.
+Every parsed request body is also recorded, so tests can inspect exactly
+what was sent (e.g. which findings were included in a scoring request).
 """
 
 import json
@@ -67,6 +70,23 @@ FALSIFY_REPLY = {
     "killed_by": "",
 }
 
+# 3 EXACT + 2 PARTIAL + 5 MISS -> weighted recall (3 + 0.5*2) / 10 = 40%.
+SCORE_REPLY = {
+    "scores": [
+        {"gt_id": "GT1", "verdict": "EXACT", "finding_id": "F001", "why": "same root cause, same fix"},
+        {"gt_id": "GT2", "verdict": "EXACT", "finding_id": "F002", "why": "same root cause, same fix"},
+        {"gt_id": "GT3", "verdict": "EXACT", "finding_id": "F003", "why": "same root cause, same fix"},
+        {"gt_id": "GT4", "verdict": "PARTIAL", "finding_id": "F004", "why": "same root cause, narrower fix"},
+        {"gt_id": "GT5", "verdict": "PARTIAL", "finding_id": "F005", "why": "severity off by two levels"},
+        {"gt_id": "GT6", "verdict": "MISS", "finding_id": None, "why": "different root cause"},
+        {"gt_id": "GT7", "verdict": "MISS", "finding_id": None, "why": "different root cause"},
+        {"gt_id": "GT8", "verdict": "MISS", "finding_id": None, "why": "different root cause"},
+        {"gt_id": "GT9", "verdict": "MISS", "finding_id": None, "why": "different root cause"},
+        {"gt_id": "GT10", "verdict": "MISS", "finding_id": None, "why": "different root cause"},
+    ],
+    "off_catalog": [{"finding_id": "F999", "note": "real-looking but outside the answer key"}],
+}
+
 POC_REPLY = (
     "function test_reentrancy() public {\n"
     "    // ASSUME: the attacker contract's receive() reenters withdraw\n"
@@ -93,6 +113,7 @@ class _MockHandler(BaseHTTPRequestHandler):
         body = self.rfile.read(length) if length else b"{}"
         request = json.loads(body or b"{}")
         self.server.request_count += 1
+        self.server.requests.append(request)
 
         user_content = ""
         for message in reversed(request.get("messages", [])):
@@ -106,6 +127,8 @@ class _MockHandler(BaseHTTPRequestHandler):
             content = _wrap(json.dumps(HUNT_REPLY), as_json=True)
         elif "TASK: FALSIFY" in user_content:
             content = _wrap(json.dumps(FALSIFY_REPLY), as_json=True)
+        elif "TASK: SCORE" in user_content:
+            content = _wrap(json.dumps(SCORE_REPLY), as_json=True)
         else:
             content = _wrap(POC_REPLY, as_json=False)
 
@@ -134,6 +157,7 @@ class MockServer:
     def __init__(self):
         self._httpd = ThreadingHTTPServer(("127.0.0.1", 0), _MockHandler)
         self._httpd.request_count = 0
+        self._httpd.requests = []
         self._thread = threading.Thread(target=self._httpd.serve_forever, daemon=True)
 
     @property
@@ -147,6 +171,10 @@ class MockServer:
     @property
     def request_count(self) -> int:
         return self._httpd.request_count
+
+    @property
+    def requests(self) -> list:
+        return self._httpd.requests
 
     def start(self) -> "MockServer":
         self._thread.start()
