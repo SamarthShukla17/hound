@@ -559,3 +559,100 @@ def test_keeps_and_needs_poc_are_untouched(tmp_path):
     files = load(tmp_path)[0]
     v = {"F001": Verdict(verdict="keep", reason="r"), "F002": Verdict(verdict="needs_poc", reason="r")}
     assert verify_disproofs(v, files) == 0
+
+
+# --- mapper failure must never produce a silently mapless run ---------------------------------
+
+
+def _patch_mapper(monkeypatch, results):
+    """Queue mapper results; each call pops one."""
+    import hound.pipeline as pipeline
+
+    queue = list(results)
+    calls = []
+
+    async def fake_mapper(router, kb, code, notes="", scope=None):
+        calls.append(1)
+        return queue.pop(0)
+
+    monkeypatch.setattr(pipeline, "mapper", fake_mapper)
+    return calls
+
+
+def test_a_mapper_failure_is_retried_once_and_the_run_continues_if_it_recovers(
+    fixture_repo, kb_dir, tmp_path, monkeypatch, capsys
+):
+    good = {"summary": "a vault", "actors": [], "entry_points": [], "state_machine": [],
+            "subsystems": [], "trust_edges": [], "invariants": []}
+    calls = _patch_mapper(monkeypatch, [{}, good])  # first attempt fails, retry succeeds
+
+    with MockServer() as mock:
+        _, doc = _run_scan(fixture_repo, kb_dir, tmp_path, monkeypatch, mock)
+
+    assert len(calls) == 2
+    assert doc["map_ok"] is True
+    assert "retrying once" in capsys.readouterr().out
+
+
+def test_a_mapper_that_fails_twice_aborts_the_seed_instead_of_hunting_with_no_map(
+    fixture_repo, kb_dir, tmp_path, monkeypatch, capsys
+):
+    """Hunting with an empty map is a different experiment, not a degraded run: every hunter
+    prompt loses its MAP block, so the seed cannot be compared with the ones beside it."""
+    import asyncio
+
+    calls = _patch_mapper(monkeypatch, [{}, {}])
+    monkeypatch.chdir(tmp_path)
+    with MockServer() as mock:
+        models_path = tmp_path / "models.yaml"
+        models_path.write_text(_models_yaml(mock.base_url))
+        out = tmp_path / "runs"
+        args = _scan_args(target=str(fixture_repo), kb=kb_dir, out=str(out), models=str(models_path))
+        exit_code = asyncio.run(scan(args))
+        hunts = [r for r in mock.requests if "TASK: HUNT" in r["messages"][-1]["content"]]
+
+    assert exit_code == 3
+    assert len(calls) == 2  # one retry, not a loop
+    assert hunts == []  # never hunted
+    assert not out.exists() or list(out.iterdir()) == []  # no run written
+    assert "SEED ABORTED" in capsys.readouterr().out
+
+
+# --- per-lens candidate accounting -------------------------------------------------------------
+
+
+def test_lens_stats_record_which_lenses_produced_candidates(fixture_repo, kb_dir, tmp_path, monkeypatch):
+    with MockServer() as mock:
+        _, doc = _run_scan(fixture_repo, kb_dir, tmp_path, monkeypatch, mock, lenses="A5,P1")
+
+    stats = doc["lens_stats"]
+    assert set(stats) == {"A5", "P1"}
+    # the mock returns the same 3 findings (1 valid, 1 bad-path, 1 malformed) for every lens
+    assert all(st["status"] == "ok" for st in stats.values())
+    assert all(st["raw"] == 2 for st in stats.values())  # malformed entry dropped by validation
+
+
+def test_a_failed_lens_is_recorded_as_failed_not_as_a_clean_zero(
+    fixture_repo, kb_dir, tmp_path, monkeypatch, capsys
+):
+    import hound.pipeline as pipeline
+    from hound.agents import HuntResult
+
+    real_hunter = pipeline.hunter
+
+    async def flaky_hunter(router, kb, lens, code, **kw):
+        if lens.id == "P1":
+            return HuntResult(ok=False, error="timeout after 300s")
+        return await real_hunter(router, kb, lens, code, **kw)
+
+    monkeypatch.setattr(pipeline, "hunter", flaky_hunter)
+    with MockServer() as mock:
+        _, doc = _run_scan(fixture_repo, kb_dir, tmp_path, monkeypatch, mock, lenses="A5,P1")
+
+    stats = doc["lens_stats"]
+    assert stats["P1"] == {"raw": 0, "status": "failed: timeout after 300s"}
+    assert stats["A5"]["status"] == "ok" and stats["A5"]["raw"] == 2
+
+    out = capsys.readouterr().out
+    assert "LENSES THAT FAILED (recall holes, not clean negatives)" in out
+    assert "P1" in out

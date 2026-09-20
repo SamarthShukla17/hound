@@ -181,6 +181,7 @@ def judge_queue(queue: list, max_judge: int):
 
 
 ABORT_MESSAGE = "OUT OF CREDITS — run aborted"
+MAP_FAILED_EXIT = 3
 
 
 async def scan(args) -> int:
@@ -248,9 +249,31 @@ async def _scan(args) -> int:
     )
 
     # --- MAP ---
+    # Hunting with an empty map is not a degraded run, it is a different experiment: every
+    # hunter prompt loses its MAP block. Retry once, then abort rather than produce a seed
+    # that cannot be compared with the ones beside it.
     raw_maps = await asyncio.gather(*(mapper(router, kb, c, notes_text, scope=scope) for c in chunks))
+    failed = [i for i, m in enumerate(raw_maps) if not m]
+    if failed:
+        print(f"mapper returned nothing for {len(failed)}/{len(chunks)} chunk(s); retrying once")
+        router.fresh = True  # never re-serve the failed reply from cache
+        retried = await asyncio.gather(
+            *(mapper(router, kb, chunks[i], notes_text, scope=scope) for i in failed)
+        )
+        router.fresh = args.fresh
+        for i, m in zip(failed, retried):
+            raw_maps[i] = m
+        still_failed = [i for i, m in enumerate(raw_maps) if not m]
+        if still_failed:
+            print(
+                f"SEED ABORTED: mapper failed for {len(still_failed)}/{len(chunks)} chunk(s) after a retry. "
+                f"Hunting with an empty map would make this run non-comparable; no run written."
+            )
+            return MAP_FAILED_EXIT
+
     merged_map = _merge_maps(raw_maps)
     map_text = _map_text(merged_map, args.map_cap)
+    map_ok = bool(map_text)
 
     run_dir = Path(args.out) / datetime.now().strftime("%Y%m%d-%H%M%S")
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -263,9 +286,13 @@ async def _scan(args) -> int:
     # TODO(step 8): thread hound.corpus.recent() through as `killed` once it exists.
     killed_text = ""
     found = []
+    # Which lenses actually produced candidates, and which produced nothing *because they
+    # failed* — a zero is only a clean negative if status is ok.
+    lens_stats = {lens.id: {"raw": 0, "status": "not reached"} for lens in lenses}
     for p in range(args.passes):
         already = [f"{c['title']} ({c['location']})" for c in found]
         temp = args.temp + 0.15 * p
+        lens_order = [lens for _ in chunks for lens in lenses]
         tasks = [
             hunter(
                 router, kb, lens, c, pmap=map_text, known=known_text, killed=killed_text, already=already,
@@ -274,8 +301,14 @@ async def _scan(args) -> int:
             for c in chunks
             for lens in lenses
         ]
-        for findings in await asyncio.gather(*tasks):
-            for finding in findings:
+        for (lens, result) in zip(lens_order, await asyncio.gather(*tasks)):
+            stat = lens_stats[lens.id]
+            if not result.ok:
+                stat["status"] = f"failed: {result.error}"  # sticky: a failure in any pass counts
+            elif stat["status"] == "not reached":
+                stat["status"] = "ok"
+            for finding in result.findings:
+                stat["raw"] += 1
                 finding["pass"] = p
                 # sha256 of each file this finding cites, as the hunter read it.
                 finding["cited"] = {
@@ -346,6 +379,7 @@ async def _scan(args) -> int:
     write_findings(
         run_dir, judge_mode, _cited_provenance(provenance_all, deduped), findings_out,
         scope=scope.as_dict(), seed=args.seed, lenses=args.lenses, passes=args.passes, scope_globs=scope_globs,
+        map_ok=map_ok, lens_stats=lens_stats,
     )
 
     (run_dir / "report.md").write_text(_render_report(args.target, deduped, verdicts, files, judge_mode, hard_ids))
@@ -356,6 +390,11 @@ async def _scan(args) -> int:
         f"judge verdicts ({judge_mode}): keep={counts['keep']} kill={counts['kill']} "
         f"needs_poc={counts['needs_poc']} | removed by deterministic gates: {len(hard_ids)}"
     )
+    productive = {lid: st["raw"] for lid, st in lens_stats.items() if st["raw"]}
+    broken = {lid: st["status"] for lid, st in lens_stats.items() if st["status"] not in ("ok", "not reached")}
+    print(f"lenses producing candidates: {productive or 'NONE'} ({len(productive)}/{len(lens_stats)})")
+    if broken:
+        print(f"LENSES THAT FAILED (recall holes, not clean negatives): {broken}")
     print(f"wrote {run_dir}")
     print(json.dumps(router.report(), indent=2))
     return 0

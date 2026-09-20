@@ -114,17 +114,44 @@ def test_hunter_keeps_only_valid_non_low_findings(kb):
         }
     )
     result = asyncio.run(hunter(r, kb, lens, "  1| contract Vault {}"))
-    assert len(result) == 1
-    assert result[0]["title"] == "Permanent lock via unclosed exists flag"
-    assert result[0]["lenses"] == ["A5"]
-    assert result[0]["votes"] == 1
+    assert result.ok and len(result.findings) == 1
+    assert result.findings[0]["title"] == "Permanent lock via unclosed exists flag"
+    assert result.findings[0]["lenses"] == ["A5"]
+    assert result.findings[0]["votes"] == 1
 
 
-def test_hunter_returns_empty_list_on_model_failure(kb):
+def test_hunter_reports_failure_distinctly_from_finding_nothing(kb):
+    """A lens that failed and a lens that legitimately found nothing both yield no
+    candidates, but only the second is a clean negative."""
     lens = kb.lenses[0]
-    r = FakeRouter(chat_json_error=RuntimeError("all targets failed"))
-    result = asyncio.run(hunter(r, kb, lens, "  1| contract Vault {}"))
-    assert result == []
+
+    failed = asyncio.run(hunter(FakeRouter(chat_json_error=RuntimeError("all targets failed")), kb, lens, "  1| x"))
+    assert failed.findings == [] and failed.ok is False
+    assert "all targets failed" in failed.error
+
+    clean = asyncio.run(hunter(FakeRouter(chat_json_result={"findings": []}), kb, lens, "  1| x"))
+    assert clean.findings == [] and clean.ok is True and clean.error == ""
+
+
+def test_a_reply_without_a_findings_list_is_a_failure_not_a_clean_negative(kb):
+    r = FakeRouter(chat_json_result={"unexpected": "shape"})
+    result = asyncio.run(hunter(r, kb, kb.lenses[0], "  1| x"))
+    assert result.ok is False and "no findings list" in result.error
+
+
+def test_a_hunter_call_that_exceeds_the_wall_clock_ceiling_is_abandoned(kb, capsys):
+    """One slow lens must not stall a whole chain, and its silence must not read as a clean
+    negative."""
+
+    class SlowRouter:
+        async def chat_json(self, *a, **kw):
+            await asyncio.sleep(10)
+            return {"findings": []}
+
+    result = asyncio.run(hunter(SlowRouter(), kb, kb.lenses[0], "  1| x", ceiling=0.05))
+    assert result.ok is False and "timeout" in result.error
+    out = capsys.readouterr().out
+    assert "hunter (A5) EXCEEDED" in out and "lens abandoned" in out
 
 
 def test_hunter_prompt_starts_with_code_and_mentions_only_its_lens(kb):
