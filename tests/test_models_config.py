@@ -28,10 +28,32 @@ def test_role_providers_exist():
             )
 
 
-def test_no_paid_target_is_active():
+def test_only_the_intended_paid_model_is_active():
     config = load_models_config()
     active_models = {t["model"] for targets in config["roles"].values() for t in targets}
-    assert active_models <= {"glm-4.7-flash", "openrouter/free"}
+    # gpt-5.6-luna and grok-4.6 stay commented out; z-ai/glm-5.3-flash is the one paid model.
+    assert active_models <= {"glm-4.7-flash", "openrouter/free", "z-ai/glm-5.3-flash"}
+
+
+def test_judge_and_scorer_never_use_the_random_free_router():
+    config = load_models_config()
+    for role in ("judge", "judge2", "scorer"):
+        models = [t["model"] for t in config["roles"][role]]
+        assert "openrouter/free" not in models, role
+
+
+def test_judge_and_scorer_are_glm_5_3_flash_then_zai_fallback():
+    config = load_models_config()
+    for role in ("judge", "scorer"):
+        targets = config["roles"][role]
+        assert [(t["provider"], t["model"]) for t in targets] == [
+            ("openrouter", "z-ai/glm-5.3-flash"),
+            ("zai", "glm-4.7-flash"),
+        ]
+
+
+def test_hunter_max_tokens_is_20000():
+    assert load_models_config()["max_tokens"]["hunter"] == 20000
 
 
 def test_role_max_tokens_are_positive_ints_for_known_roles():

@@ -66,3 +66,23 @@ def test_verdict_severity_is_optional():
 
 def test_sev_rank_orders_critical_first():
     assert SEV_RANK["critical"] < SEV_RANK["high"] < SEV_RANK["medium"] < SEV_RANK["low"]
+
+
+@pytest.mark.parametrize("blank", ["null", "NULL", "None", "", "  ", None])
+def test_verdict_coerces_blank_severity_to_none(blank):
+    v = Verdict(verdict="keep", reason="r", severity=blank)
+    assert v.severity is None
+
+
+def test_verdict_still_rejects_a_genuinely_invalid_severity():
+    with pytest.raises(ValidationError):
+        Verdict(verdict="keep", reason="r", severity="catastrophic")
+
+
+def test_verdict_coerces_null_killed_by_to_empty_string():
+    assert Verdict(verdict="keep", reason="r", killed_by=None).killed_by == ""
+
+
+def test_verdict_missing_verdict_is_still_a_validation_error():
+    with pytest.raises(ValidationError):
+        Verdict(**{"auditor": "Senior Smart-contract auditor", "evidence": []})

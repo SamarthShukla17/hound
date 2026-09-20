@@ -170,10 +170,31 @@ async def judge(r, kb, role: str, cand: dict, code: str, pmap=None, known: str =
 
     try:
         data = await r.chat_json(role, sys_prompt, user, temperature=0.0)
-        return Verdict(**data)
     except Exception as exc:  # noqa: BLE001 - never kill a candidate because the judge call failed
         print(f"[agents] judge ({role}) failed: {exc}")
         return Verdict(verdict="needs_poc", reason=str(exc))
+
+    try:
+        return Verdict(**data)
+    except (ValidationError, TypeError) as first_error:
+        # The model answered, just not in the verdict shape (missing "verdict", wrong types).
+        # Ask ONCE for a well-formed verdict rather than silently defaulting to needs_poc.
+        print(f"[agents] judge ({role}) verdict failed validation, repairing once: {str(first_error)[:120]}")
+
+    repair_user = _user_prompt(
+        user,
+        "REPAIR: your previous reply was not a valid verdict:\n"
+        + json.dumps(data, sort_keys=True, default=str)[:2000]
+        + '\nReply again with ONLY {"verdict": "keep|kill|needs_poc", "reason": "...", '
+        '"severity": "critical|high|medium|low or null", "killed_by": "..."}. '
+        '"verdict" and "reason" are required.',
+    )
+    try:
+        repaired = await r.chat_json(role, sys_prompt, repair_user, temperature=0.0)
+        return Verdict(**repaired)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[agents] judge ({role}) repair failed: {exc}")
+        return Verdict(verdict="needs_poc", reason=f"judge reply unusable after one repair: {exc}")
 
 
 async def poc(r, kb, cand: dict, code: str, framework: str = "foundry", refs: str = "") -> str:

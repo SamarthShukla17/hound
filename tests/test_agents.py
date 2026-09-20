@@ -25,7 +25,10 @@ def kb():
 
 
 class FakeRouter:
-    def __init__(self, *, chat_json_result=None, chat_json_error=None, chat_result=None, chat_error=None):
+    def __init__(
+        self, *, chat_json_result=None, chat_json_results=None, chat_json_error=None, chat_result=None, chat_error=None
+    ):
+        self.chat_json_results = list(chat_json_results) if chat_json_results is not None else None
         self.chat_json_result = chat_json_result
         self.chat_json_error = chat_json_error
         self.chat_result = chat_result
@@ -36,6 +39,8 @@ class FakeRouter:
         self.calls.append({"role": role, "system": system, "user": user, "temperature": temperature})
         if self.chat_json_error is not None:
             raise self.chat_json_error
+        if self.chat_json_results is not None:
+            return self.chat_json_results.pop(0)
         return self.chat_json_result
 
     async def chat(self, role, system, user, *, temperature=0.3, max_tokens=2048):
@@ -196,3 +201,47 @@ def test_poc_prompt_demands_a_self_contained_compilable_file(kb):
     assert "define it in full in this file" in user
     assert "fallback/receive" in user
     assert "Nothing that does not compile is a PoC" in user
+
+
+# --- judge: malformed payloads seen in the live bench run --------------------
+
+CAND = {"title": "x", "location": "Vault.sol:1"}
+CODE = "  1| contract Vault {}"
+# The string "null" for severity and null for killed_by, with a valid verdict/reason.
+SEVERITY_NULL_STRING = {"verdict": "keep", "reason": "no guard found", "severity": "null", "killed_by": None}
+# The model answered with an unrelated shape: no verdict, no reason.
+MISSING_VERDICT = {"auditor": "Senior Smart-contract auditor", "evidence": []}
+
+
+def test_judge_accepts_severity_null_string_and_null_killed_by_without_a_repair_call(kb):
+    r = FakeRouter(chat_json_result=SEVERITY_NULL_STRING)
+    result = asyncio.run(judge(r, kb, "judge", CAND, CODE))
+    assert result.verdict == "keep"
+    assert result.severity is None
+    assert result.killed_by == ""
+    assert len(r.calls) == 1
+
+
+def test_judge_missing_verdict_triggers_exactly_one_repair_call_and_uses_it(kb):
+    good = {"verdict": "kill", "reason": "guarded by onlyOwner at line 5", "severity": None, "killed_by": "onlyOwner"}
+    r = FakeRouter(chat_json_results=[MISSING_VERDICT, good])
+    result = asyncio.run(judge(r, kb, "judge", CAND, CODE))
+    assert result.verdict == "kill"
+    assert len(r.calls) == 2
+    repair_prompt = r.calls[1]["user"]
+    assert repair_prompt.startswith(CODE)  # the ordering rule still holds on the repair call
+    assert "REPAIR" in repair_prompt and "auditor" in repair_prompt
+
+
+def test_judge_missing_verdict_and_a_bad_repair_falls_back_to_needs_poc_after_one_repair(kb):
+    r = FakeRouter(chat_json_results=[MISSING_VERDICT, MISSING_VERDICT, MISSING_VERDICT])
+    result = asyncio.run(judge(r, kb, "judge", CAND, CODE))
+    assert result.verdict == "needs_poc"
+    assert len(r.calls) == 2  # original + ONE repair, never a loop
+
+
+def test_judge_call_that_raises_is_not_repaired_it_is_needs_poc(kb):
+    r = FakeRouter(chat_json_error=RuntimeError("all targets failed"))
+    result = asyncio.run(judge(r, kb, "judge", CAND, CODE))
+    assert result.verdict == "needs_poc"
+    assert len(r.calls) == 1

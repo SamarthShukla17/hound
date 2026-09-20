@@ -218,7 +218,7 @@ def test_max_tokens_precedence_target_over_role_map_over_default(tmp_path, monke
 
     monkeypatch.setattr(Provider, "complete", fake_complete)
 
-    for role, expected in [("hunter", 12000), ("mapped_role", 777), ("targeted_role", 4321), ("unknown_role", 2048)]:
+    for role, expected in [("hunter", 20000), ("mapped_role", 777), ("targeted_role", 4321), ("unknown_role", 2048)]:
         asyncio.run(router.chat(role, "s", f"u-{role}"))
         assert sent["max_tokens"] == expected, role
 

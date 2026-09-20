@@ -27,7 +27,7 @@ TERMINAL_STATUS_CODES = {400, 401, 403, 404}
 # map, or per target with a `max_tokens:` key on the target itself.
 DEFAULT_MAX_TOKENS = {
     "mapper": 8000,
-    "hunter": 12000,
+    "hunter": 20000,
     "judge": 6000,
     "judge2": 6000,
     "poc": 8000,
