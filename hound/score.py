@@ -241,3 +241,59 @@ async def score(args) -> int:
     (run_dir / "score.json").write_text(json.dumps(result, indent=2, sort_keys=True))
     print(json.dumps(router.report(), indent=2))
     return 0
+
+
+_RANK = {"MISS": 0, "PARTIAL": 1, "EXACT": 2}
+
+
+def union_scores(run_dirs) -> dict:
+    """Combine several scored runs (e.g. seeds). A ground-truth bug counts as found if ANY run
+    found it, at the best verdict any run gave it. This is how the single-agent baseline's
+    ~22% was produced, so it is the fair comparison for a fan-out run's recall."""
+    runs = []
+    for d in run_dirs:
+        data = json.loads((Path(d) / "score.json").read_text())
+        meta, _ = read_findings(d)
+        runs.append({
+            "label": f"{Path(d).name} (seed {meta.get('seed', '?')})",
+            "recall": data["weighted_recall_pct"],
+            "verdicts": {s["gt_id"]: s["verdict"] for s in data["scores"]},
+        })
+
+    gt_ids = list(dict.fromkeys(g for r in runs for g in r["verdicts"]))
+    best, found_by = {}, {}
+    for g in gt_ids:
+        verdicts = {r["label"]: r["verdicts"].get(g, "MISS") for r in runs}
+        best[g] = max(verdicts.values(), key=_RANK.get)
+        found_by[g] = [label for label, v in verdicts.items() if v != "MISS"]
+
+    exact = sum(v == "EXACT" for v in best.values())
+    partial = sum(v == "PARTIAL" for v in best.values())
+    n = len(gt_ids)
+    return {
+        "per_run": [{"label": r["label"], "weighted_recall_pct": r["recall"]} for r in runs],
+        "union": {
+            "EXACT": exact, "PARTIAL": partial, "MISS": n - exact - partial,
+            "weighted_recall_pct": (exact + 0.5 * partial) / n * 100 if n else 0.0,
+        },
+        "best": best,
+        "found_by": found_by,
+        "only_one_run": {g: labels[0] for g, labels in found_by.items() if len(labels) == 1},
+    }
+
+
+def print_union(result: dict) -> None:
+    for r in result["per_run"]:
+        print(f"{r['label']:38} weighted recall {r['weighted_recall_pct']:5.1f}%")
+    u = result["union"]
+    print(f"{'UNION (found by ANY run)':38} weighted recall {u['weighted_recall_pct']:5.1f}%  "
+          f"(EXACT {u['EXACT']}, PARTIAL {u['PARTIAL']}, MISS {u['MISS']})")
+    print("\nfound at all:")
+    for g, labels in result["found_by"].items():
+        if labels:
+            print(f"  {g:6} {result['best'][g]:8} by {len(labels)}/{len(result['per_run'])} runs")
+    print("\ncaught by exactly ONE run (run-to-run variance):")
+    for g, label in result["only_one_run"].items():
+        print(f"  {g:6} {result['best'][g]:8} only {label}")
+    if not result["only_one_run"]:
+        print("  (none)")

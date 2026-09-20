@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from hound.llm import Provider, Router, cache_key, extract_json
+from hound.llm import Provider, Router, cache_key, extract_json, parse_cache_any_model
 
 FIXTURE_MODELS_YAML = textwrap.dedent(
     """
@@ -307,3 +307,73 @@ def test_a_reply_cut_off_at_max_tokens_is_returned_but_never_cached(models_yaml,
     assert text == '{"findings": ['
     assert list(router.cache_dir.glob("*.txt")) == []
     assert "TRUNCATED BY max_tokens" in capsys.readouterr().out
+
+
+# --- cache_any_model ---------------------------------------------------------------------
+
+CACHE_ANY_YAML = textwrap.dedent(
+    """
+    providers:
+      primary: {base_url: "http://example.invalid/v1", key_env: TEST_KEY_PRESENT, rpm: 6000, concurrency: 2, timeout: 5}
+    roles:
+      hunter:  [{provider: primary, model: primary-model}, {provider: primary, model: fallback-model}]
+      judge:   [{provider: primary, model: primary-model}, {provider: primary, model: fallback-model}]
+    prices: {}
+    """
+)
+
+
+def _cache_any_router(tmp_path, monkeypatch, **kw):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("TEST_KEY_PRESENT", "secret")
+    path = tmp_path / "models.yaml"
+    path.write_text(CACHE_ANY_YAML)
+    return Router(models_path=str(path), **kw)
+
+
+def test_hunter_reply_cached_under_the_fallback_model_is_replayed_when_the_primary_is_tried_first(tmp_path, monkeypatch):
+    router = _cache_any_router(tmp_path, monkeypatch)
+    calls = []
+
+    async def fake_complete(self, *, model, messages, temperature, max_tokens, extra=None):
+        calls.append(model)
+        return _resp("reply", 5)
+
+    monkeypatch.setattr(Provider, "complete", fake_complete)
+    # a previous run's reply was produced by the fallback model...
+    (router.cache_dir / f"{cache_key('*', 's', 'prompt', 0.3, 0)}.txt").write_text("reply from the fallback")
+    # ...and this run tries the primary first, but must still replay it rather than re-sample
+    assert asyncio.run(router.chat("hunter", "s", "prompt")) == "reply from the fallback"
+    assert calls == []
+
+
+def test_judge_cache_stays_model_specific(tmp_path, monkeypatch):
+    router = _cache_any_router(tmp_path, monkeypatch)
+    calls = []
+
+    async def fake_complete(self, *, model, messages, temperature, max_tokens, extra=None):
+        calls.append(model)
+        return _resp("fresh verdict", 5)
+
+    monkeypatch.setattr(Provider, "complete", fake_complete)
+    # a verdict cached for the FALLBACK model must not answer for the primary
+    (router.cache_dir / f"{cache_key('fallback-model', 's', 'prompt', 0.3, 0)}.txt").write_text("old verdict")
+    assert asyncio.run(router.chat("judge", "s", "prompt")) == "fresh verdict"
+    assert calls == ["primary-model"]
+
+
+def test_cache_any_model_none_restores_model_specific_hunter_keys(tmp_path, monkeypatch):
+    router = _cache_any_router(tmp_path, monkeypatch, cache_any_model=parse_cache_any_model("none"))
+
+    async def fake_complete(self, *, model, messages, temperature, max_tokens, extra=None):
+        return _resp("fresh", 5)
+
+    monkeypatch.setattr(Provider, "complete", fake_complete)
+    (router.cache_dir / f"{cache_key('*', 's', 'prompt', 0.3, 0)}.txt").write_text("agnostic entry")
+    assert asyncio.run(router.chat("hunter", "s", "prompt")) == "fresh"
+
+
+def test_parse_cache_any_model():
+    assert parse_cache_any_model(None) == {"mapper", "hunter", "poc"}
+    assert parse_cache_any_model("none") == frozenset() == parse_cache_any_model("")
+    assert parse_cache_any_model("hunter, judge") == {"hunter", "judge"}

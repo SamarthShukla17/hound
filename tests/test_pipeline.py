@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from hound.codebase import check_provenance, file_sha256, load
-from hound.pipeline import _cited_salt, citation_gate, scan
+from hound.pipeline import _cited_salt, citation_gate, rejudge, scan
 from hound.runs import CITATION_GATE, STALE_CITATION
 from hound.schema import Verdict
 from tests.mock_server import FIXTURE_LOCATION, MockServer
@@ -80,6 +80,9 @@ def _scan_args(**overrides) -> argparse.Namespace:
         fresh=True,
         no_judge2=False,
         judge_mode="advisory",
+        scope_profile="contest",
+        scope_rules=None,
+        cache_any_model=None,
         dry_run=False,
         out=None,
         models=None,
@@ -378,3 +381,128 @@ def test_advisory_report_orders_by_votes_then_severity(tmp_path):
     report = _render_report("t", cands, verdicts, files, "advisory", frozenset())
     table_ids = [line.split("|")[1].strip() for line in report.splitlines() if line.startswith("| F")]
     assert table_ids == ["F003", "F002", "F001"]
+
+
+# --- scope profile ------------------------------------------------------------------------
+
+
+def _by_task(mock, marker):
+    return [r for r in mock.requests if marker in r["messages"][-1]["content"]]
+
+
+def test_the_scope_profile_reaches_hunters_and_judge_and_is_recorded_in_findings_json(fixture_repo, kb_dir, tmp_path, monkeypatch):
+    with MockServer() as mock:
+        out_dir, doc = _run_scan(fixture_repo, kb_dir, tmp_path, monkeypatch, mock, scope_profile="bounty", seed=7)
+        hunts, judges = _by_task(mock, "TASK: HUNT"), _by_task(mock, "TASK: FALSIFY")
+
+    assert hunts and judges
+    for req in hunts + judges:
+        system = req["messages"][0]["content"]
+        assert "SCOPE RULES (bounty profile)" in system and "SCOPE RULES (contest profile)" not in system
+
+    assert doc["scope"]["name"] == "bounty" and doc["scope"]["source"] == "builtin"
+    assert "Privileged-only paths are usually excluded" in doc["scope"]["text"]
+    assert doc["seed"] == 7 and doc["lenses"] == "A5" and doc["passes"] == 1
+
+
+def test_default_scope_is_contest(fixture_repo, kb_dir, tmp_path, monkeypatch):
+    with MockServer() as mock:
+        _, doc = _run_scan(fixture_repo, kb_dir, tmp_path, monkeypatch, mock)
+        judges = _by_task(mock, "TASK: FALSIFY")
+    assert doc["scope"]["name"] == "contest"
+    assert "SCOPE RULES (contest profile)" in judges[0]["messages"][0]["content"]
+
+
+def test_a_scope_rules_file_replaces_the_profile(fixture_repo, kb_dir, tmp_path, monkeypatch):
+    rules = tmp_path / "readme_scope.md"
+    rules.write_text("Only the Vault contract is in scope.\n")
+    with MockServer() as mock:
+        _, doc = _run_scan(fixture_repo, kb_dir, tmp_path, monkeypatch, mock, scope_rules=str(rules))
+        system = _by_task(mock, "TASK: HUNT")[0]["messages"][0]["content"]
+    assert doc["scope"]["name"] == "custom"
+    assert "Only the Vault contract is in scope." in system
+    assert "SCOPE RULES (contest profile)" not in system
+
+
+def test_scope_notes_now_reach_the_hunters_and_the_judge(fixture_repo, kb_dir, tmp_path, monkeypatch):
+    notes = tmp_path / "notes.md"
+    notes.write_text("The s2Admin role is trusted.\n")
+    with MockServer() as mock:
+        _run_scan(fixture_repo, kb_dir, tmp_path, monkeypatch, mock, notes=str(notes))
+        for marker in ("TASK: HUNT", "TASK: FALSIFY"):
+            assert "The s2Admin role is trusted." in _by_task(mock, marker)[0]["messages"][-1]["content"]
+
+
+# --- rejudge ------------------------------------------------------------------------------
+
+
+def _rejudge_args(src_dir, tmp_path, mock, **overrides):
+    import argparse
+
+    defaults = dict(
+        run_dir=str(src_dir), kb=str(Path(__file__).parent.parent / "kb"), known=None, notes=None,
+        scope_profile="contest", scope_rules=None, judge_mode="advisory", judge_budget=120_000,
+        map_cap=12_000, max_judge=40, no_judge2=False, fresh=True, out=str(tmp_path / "rejudged"),
+        models=str(tmp_path / "models.yaml"), local_only=False, cache_any_model=None,
+    )
+    defaults.update(overrides)
+    return argparse.Namespace(**defaults)
+
+
+def test_rejudge_reruns_only_the_judge_stage_and_writes_a_new_run_dir(fixture_repo, kb_dir, tmp_path, monkeypatch):
+    import asyncio
+
+    with MockServer() as mock:
+        src_dir, before = _run_scan(fixture_repo, kb_dir, tmp_path, monkeypatch, mock)
+        requests_before = len(mock.requests)
+
+        assert asyncio.run(rejudge(_rejudge_args(src_dir, tmp_path, mock, scope_profile="bounty"))) == 0
+        new_requests = mock.requests[requests_before:]
+
+    # nothing but judge calls: no mapping, no hunting, no PoC
+    assert new_requests and all("TASK: FALSIFY" in r["messages"][-1]["content"] for r in new_requests)
+    assert all("SCOPE RULES (bounty profile)" in r["messages"][0]["content"] for r in new_requests)
+
+    out_dirs = list((tmp_path / "rejudged").iterdir())
+    assert len(out_dirs) == 1 and out_dirs[0].name.endswith("-rejudge")
+    after = json.loads((out_dirs[0] / "findings.json").read_text())
+
+    assert after["rejudged_from"] == str(src_dir)
+    assert after["scope"]["name"] == "bounty" and before["scope"]["name"] == "contest"
+    assert after["provenance"] == before["provenance"] and after["seed"] == before["seed"]
+    assert [f["id"] for f in after["findings"]] == [f["id"] for f in before["findings"]]  # ids preserved for scoring
+    assert (out_dirs[0] / "report.md").exists() and (out_dirs[0] / "map.json").exists()
+    assert not (out_dirs[0] / "pocs").exists()
+    assert all("poc_path" not in f for f in after["findings"])
+
+    # the deterministic gate kill is carried over untouched, not re-judged
+    hard = [f for f in after["findings"] if f["hard_kill"]]
+    assert [f["verdict"]["killed_by"] for f in hard] == [CITATION_GATE]
+
+
+def test_rejudge_refuses_when_the_code_changed_since_the_hunter_read_it(fixture_repo, kb_dir, tmp_path, monkeypatch, capsys):
+    import asyncio
+
+    with MockServer() as mock:
+        src_dir, _ = _run_scan(fixture_repo, kb_dir, tmp_path, monkeypatch, mock)
+        (fixture_repo / "src" / "Vault.sol").write_text(FIXTURE_VAULT_SOL + "// edited\n")
+        requests_before = len(mock.requests)
+
+        assert asyncio.run(rejudge(_rejudge_args(src_dir, tmp_path, mock))) == 1
+        assert len(mock.requests) == requests_before  # refused before spending anything
+
+    out = capsys.readouterr().out
+    assert "rejudge REFUSED" in out and "src/Vault.sol: content changed since it was read" in out
+    assert not (tmp_path / "rejudged").exists()
+
+
+def test_rejudge_refuses_a_run_that_predates_provenance(tmp_path, capsys):
+    import asyncio
+
+    legacy = tmp_path / "old_run"
+    legacy.mkdir()
+    (legacy / "findings.json").write_text(json.dumps([{"id": "F001", "verdict": {"verdict": "keep"}}]))
+    (legacy / "map.json").write_text("{}")
+    args = _rejudge_args(legacy, tmp_path, None)
+    assert asyncio.run(rejudge(args)) == 1
+    assert "predates provenance" in capsys.readouterr().out

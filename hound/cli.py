@@ -25,10 +25,27 @@ def _cmd_scan(args: argparse.Namespace) -> int:
     return asyncio.run(scan(args))
 
 
+def _cmd_rejudge(args: argparse.Namespace) -> int:
+    from .pipeline import rejudge
+
+    return asyncio.run(rejudge(args))
+
+
 def _cmd_score(args: argparse.Namespace) -> int:
     from .score import score
 
     return asyncio.run(score(args))
+
+
+def _cmd_union(args: argparse.Namespace) -> int:
+    from .score import print_union, union_scores
+
+    try:
+        print_union(union_scores(args.run_dirs))
+    except (OSError, KeyError, ValueError) as exc:
+        print(f"union: {exc}")
+        return 1
+    return 0
 
 
 def _cmd_kill(args: argparse.Namespace) -> int:
@@ -55,6 +72,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--local-only", action="store_true", help="only use local (Ollama) providers"
     )
+    parser.add_argument(
+        "--cache-any-model", dest="cache_any_model", default=None, metavar="ROLES",
+        help='roles whose cache key ignores the model id, comma-separated (default: mapper,hunter,poc; '
+             '"none" disables). judge/scorer stay model-specific unless listed.',
+    )
 
     sub = parser.add_subparsers(dest="command")
 
@@ -78,9 +100,35 @@ def build_parser() -> argparse.ArgumentParser:
         "--judge-mode", dest="judge_mode", choices=["advisory", "gate"], default="advisory",
         help="advisory (default): the judge annotates, nothing is removed; gate: judge kills are removed from the scored set",
     )
+    scan.add_argument(
+        "--scope-profile", dest="scope_profile", choices=["contest", "bounty"], default="contest",
+        help="contest (default): a privileged actor harming users IS a finding; bounty: privileged-only paths are excluded",
+    )
+    scan.add_argument(
+        "--scope-rules", dest="scope_rules", default=None, metavar="FILE",
+        help="the target's actual README scope text; overrides --scope-profile",
+    )
     scan.add_argument("--dry-run", dest="dry_run", action="store_true")
     scan.add_argument("--out", default="runs", help="output directory (default: runs)")
     scan.set_defaults(handler=_cmd_scan)
+
+    rejudge = sub.add_parser(
+        "rejudge", help="re-run only the judge stage on a finished run (no re-hunt); writes a new run dir"
+    )
+    rejudge.add_argument("run_dir")
+    rejudge.add_argument("--kb", default="kb")
+    rejudge.add_argument("--known", default=None)
+    rejudge.add_argument("--notes", default=None, help="scope notes file; name trusted roles here (contest profile)")
+    rejudge.add_argument("--scope-profile", dest="scope_profile", choices=["contest", "bounty"], default="contest")
+    rejudge.add_argument("--scope-rules", dest="scope_rules", default=None, metavar="FILE")
+    rejudge.add_argument("--judge-mode", dest="judge_mode", choices=["advisory", "gate"], default="advisory")
+    rejudge.add_argument("--judge-budget", dest="judge_budget", type=int, default=120_000)
+    rejudge.add_argument("--map-cap", dest="map_cap", type=int, default=12_000)
+    rejudge.add_argument("--max-judge", dest="max_judge", type=int, default=40)
+    rejudge.add_argument("--no-judge2", dest="no_judge2", action="store_true")
+    rejudge.add_argument("--fresh", action="store_true", help="bypass the disk cache on read")
+    rejudge.add_argument("--out", default="runs")
+    rejudge.set_defaults(handler=_cmd_rejudge)
 
     score = sub.add_parser("score", help="score a run against a ground-truth file")
     score.add_argument("run_dir")
@@ -90,6 +138,10 @@ def build_parser() -> argparse.ArgumentParser:
     score.add_argument("--as-gate", dest="as_gate", action="store_true",
                        help="score only what a judge gate would have kept (drop every judge kill)")
     score.set_defaults(handler=_cmd_score)
+
+    union = sub.add_parser("union", help="union several scored runs (e.g. seeds): a bug counts if ANY run found it")
+    union.add_argument("run_dirs", nargs="+", help="run dirs that each contain a score.json")
+    union.set_defaults(handler=_cmd_union)
 
     kill = sub.add_parser("kill", help="confirm a finding as a false positive")
     kill.add_argument("run_dir")

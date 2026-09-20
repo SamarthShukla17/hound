@@ -12,18 +12,19 @@ import json
 from pydantic import ValidationError
 
 from .schema import Finding, Verdict
+from .scope import CONTEST
 
 IMPACT_LADDER = """IMPACT LADDER
 - critical: direct theft, unbacked mint, or permanent freeze reachable by an unprivileged actor.
 - high: fund loss or permanent lock under a reachable condition; a broken core invariant; privilege escalation.
 - medium: bounded value leakage, mis-accounting, or griefing/DoS of a core function.
-Explicitly ignore: style, gas, events, naming, centralization/admin-trust, admin misconfiguration."""
+Explicitly ignore: style, gas, events, naming. (What counts as in scope for privileged actors is set by the SCOPE RULES below.)"""
 
 EVIDENCE_RULES = """EVIDENCE RULES
 - Cite only real numbered lines, as path:line or path:start-end. No citation means no finding.
 - Name the root-cause defect (the exact missing or wrong check), not a symptom.
 - State the cheapest test that would prove the finding wrong.
-- Privileged-only paths, known/acknowledged issues, and listed killed false positives are not findings.
+- Known/acknowledged issues and listed killed false positives are not findings.
 - Reason privately, step by step. Output ONLY the requested JSON — no prose, no code fences."""
 
 ROLE_PROMPT = (
@@ -32,9 +33,10 @@ ROLE_PROMPT = (
 )
 
 
-def system(kb) -> str:
-    """Shared system prompt: role, impact ladder, kb.principles verbatim, evidence rules."""
-    return "\n\n".join([ROLE_PROMPT, IMPACT_LADDER, kb.principles, EVIDENCE_RULES])
+def system(kb, scope_rules: str = "") -> str:
+    """Shared system prompt: role, impact ladder, kb.principles verbatim, the run's SCOPE
+    RULES, evidence rules. `scope_rules` defaults to the contest profile."""
+    return "\n\n".join([ROLE_PROMPT, IMPACT_LADDER, kb.principles, scope_rules or CONTEST, EVIDENCE_RULES])
 
 
 def _map_block(pmap) -> str:
@@ -62,8 +64,8 @@ def _user_prompt(*sections: str) -> str:
     return "\n\n".join(s for s in sections if s)
 
 
-async def mapper(r, kb, code: str, notes: str = "") -> dict:
-    sys_prompt = system(kb)
+async def mapper(r, kb, code: str, notes: str = "", scope_rules: str = "") -> dict:
+    sys_prompt = system(kb, scope_rules)
     notes_block = f"SCOPE NOTES:\n{notes}" if notes else ""
     task = (
         "TASK: MAP\n"
@@ -91,11 +93,12 @@ async def mapper(r, kb, code: str, notes: str = "") -> dict:
 
 async def hunter(
     r, kb, lens, code: str, pmap=None, known: str = "", killed: str = "", already=None, temp: float = 0.3,
-    cache_salt: str = "",
+    cache_salt: str = "", scope_rules: str = "", notes: str = "",
 ):
-    sys_prompt = system(kb)
+    sys_prompt = system(kb, scope_rules)
 
     map_block = _map_block(pmap)
+    notes_block = f"SCOPE NOTES (trusted roles, exclusions):\n{notes}" if notes else ""
     known_block = f"KNOWN/ACKNOWLEDGED ISSUES:\n{known}" if known else ""
     killed_block = f"KILLED FALSE POSITIVES:\n{killed}" if killed else ""
     already_block = (
@@ -118,7 +121,7 @@ async def hunter(
         '"location": "path:line-or-range", "root_cause": "...", "impact": "...", '
         '"exploit_steps": ["..."], "falsification": "...", "confidence": 0.5}]}'
     )
-    user = _user_prompt(code, map_block, known_block, killed_block, already_block, lens_block, task)
+    user = _user_prompt(code, map_block, notes_block, known_block, killed_block, already_block, lens_block, task)
 
     try:
         data = await r.chat_json("hunter", sys_prompt, user, temperature=temp, **_salt(cache_salt))
@@ -149,11 +152,13 @@ async def hunter(
 
 
 async def judge(
-    r, kb, role: str, cand: dict, code: str, pmap=None, known: str = "", killed: str = "", cache_salt: str = ""
+    r, kb, role: str, cand: dict, code: str, pmap=None, known: str = "", killed: str = "", cache_salt: str = "",
+    scope_rules: str = "", notes: str = "",
 ) -> Verdict:
-    sys_prompt = system(kb)
+    sys_prompt = system(kb, scope_rules)
 
     map_block = _map_block(pmap)
+    notes_block = f"SCOPE NOTES (trusted roles, exclusions):\n{notes}" if notes else ""
     known_block = f"KNOWN/ACKNOWLEDGED ISSUES:\n{known}" if known else ""
     killed_block = f"KILLED FALSE POSITIVES:\n{killed}" if killed else ""
     cand_block = (
@@ -166,17 +171,18 @@ async def judge(
         "1. Verify every cited line actually says what the candidate claims.\n"
         "2. Hunt for the cheapest disproof: an existing guard, modifier, constraint, caller "
         "restriction, a rounding direction that already protects the protocol, an unreachable "
-        "state, privileged-only access, a known/acknowledged issue, or a match against a listed "
+        "state, a known/acknowledged issue, an exclusion the SCOPE RULES above actually make, or a match against a listed "
         "killed false positive.\n"
-        "3. Only if no disproof survives, the reasoning is coherent end to end, and the attacker "
-        "is unprivileged: verdict = keep.\n\n"
+        "3. Only if no disproof survives, the reasoning is coherent end to end, and the finding is "
+        "in scope under the SCOPE RULES above: verdict = keep. Apply those rules exactly as written; "
+        "do not add exclusions of your own.\n\n"
         "If the logic holds but hinges on a runtime value you cannot see here (deploy config, "
         "actual token behavior, on-chain parameters): verdict = needs_poc. That is a real third "
         "answer, not a hedge — it routes the candidate to a human instead of silently killing it.\n\n"
         'Return ONLY this JSON shape: {"verdict": "keep|kill|needs_poc", "reason": "...", '
         '"severity": "critical|high|medium|low or null", "killed_by": "..."}'
     )
-    user = _user_prompt(code, map_block, known_block, killed_block, cand_block, task)
+    user = _user_prompt(code, map_block, notes_block, known_block, killed_block, cand_block, task)
 
     try:
         data = await r.chat_json(role, sys_prompt, user, temperature=0.0, **_salt(cache_salt))
@@ -207,8 +213,8 @@ async def judge(
         return Verdict(verdict="needs_poc", reason=f"judge reply unusable after one repair: {exc}")
 
 
-async def poc(r, kb, cand: dict, code: str, framework: str = "foundry", refs: str = "") -> str:
-    sys_prompt = system(kb)
+async def poc(r, kb, cand: dict, code: str, framework: str = "foundry", refs: str = "", scope_rules: str = "") -> str:
+    sys_prompt = system(kb, scope_rules)
 
     refs_block = f"POC SKELETONS FOR REFERENCE:\n{refs[:6000]}" if refs else ""
     cand_block = "FINDING TO REPRODUCE:\n" + json.dumps(cand, sort_keys=True)

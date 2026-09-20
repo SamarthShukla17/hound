@@ -13,10 +13,11 @@ from datetime import datetime
 from pathlib import Path
 
 from .agents import hunter, judge, mapper, poc
-from .codebase import build_provenance, chunk, load, rel_path
+from .codebase import build_provenance, check_provenance, chunk, load, rel_path
 from .knowledge import load_kb, poc_refs, select
-from .llm import Router
-from .runs import CITATION_GATE, STALE_CITATION, is_hard_kill, write_findings
+from .llm import Router, parse_cache_any_model
+from .runs import CITATION_GATE, STALE_CITATION, is_hard_kill, read_findings, write_findings
+from .scope import DEFAULT_PROFILE, resolve_scope
 from .schema import SEV_RANK, Verdict
 from .verify import dedup, judge_context, snippets, spans
 
@@ -110,6 +111,46 @@ def _cited_provenance(full: dict, deduped: list) -> dict:
     return {**full, "files": {rel: meta for rel, meta in full["files"].items() if rel in cited}}
 
 
+async def run_judges(router, kb, queue, contexts, *, map_text, known, killed, notes, scope_rules, no_judge2) -> dict:
+    """The judge stage: judge every queued candidate, then judge2 (if configured) on the keeps.
+
+    Shared by scan and rejudge so a re-judge is exactly the judge stage of a scan, nothing
+    else. A judge2 kill downgrades a keep to needs_poc with the dissent appended: a
+    disagreement between two model families is information for the human, not a tiebreak.
+    """
+    def call(role, c):
+        return judge(
+            router, kb, role, c, contexts[c["id"]], pmap=map_text, known=known, killed=killed,
+            cache_salt=_cited_salt(c), scope_rules=scope_rules, notes=notes,
+        )
+
+    results = await asyncio.gather(*(call("judge", c) for c in queue))
+    verdicts = {c["id"]: v for c, v in zip(queue, results)}
+
+    keeps = [c for c in queue if verdicts[c["id"]].verdict == "keep"]
+    if not no_judge2 and not router.has("judge2") and keeps:
+        print(f"judge2: no target configured — {len(keeps)} keeps are single-judge, no dissent signal")
+    if not no_judge2 and router.has("judge2") and keeps:
+        for c, v2 in zip(keeps, await asyncio.gather(*(call("judge2", c) for c in keeps))):
+            if v2.verdict == "kill":
+                v1 = verdicts[c["id"]]
+                verdicts[c["id"]] = Verdict(
+                    verdict="needs_poc",
+                    reason=f"{v1.reason} || JUDGE2 DISSENT: {v2.reason}",
+                    severity=v1.severity,
+                    killed_by=v1.killed_by,
+                )
+    return verdicts
+
+
+def judge_queue(queue: list, max_judge: int):
+    """Order candidates by (votes, severity, confidence); anything past max_judge becomes an
+    explicit needs_poc "not judged", never silently dropped. Returns (queue, overflow_verdicts)."""
+    queue = sorted(queue, key=lambda c: (-c.get("votes", 1), SEV_RANK[c["severity"]], -c.get("confidence", 0.5)))
+    overflow, queue = queue[max_judge:], queue[:max_judge]
+    return queue, {c["id"]: Verdict(verdict="needs_poc", reason="not judged (over --max-judge)") for c in overflow}
+
+
 async def scan(args) -> int:
     kb = load_kb(args.kb)
     scope_globs = _read_scope_globs(args.scope)
@@ -119,6 +160,12 @@ async def scan(args) -> int:
     judge_mode = getattr(args, "judge_mode", "advisory")
     if judge_mode not in JUDGE_MODES:
         print(f"unknown --judge-mode {judge_mode!r} (expected one of {', '.join(JUDGE_MODES)})")
+        return 1
+
+    try:
+        scope = resolve_scope(getattr(args, "scope_profile", DEFAULT_PROFILE), getattr(args, "scope_rules", None))
+    except (OSError, ValueError) as exc:
+        print(f"scope rules: {exc}")
         return 1
 
     files, refused = load(args.target, scope_globs)
@@ -139,6 +186,7 @@ async def scan(args) -> int:
 
     print(f"files: {len(files)}  lines: {total_lines}  chunks: {len(chunks)}  lenses: {len(lenses)}  passes: {args.passes}")
     print(f"planned: {len(chunks)} map calls + {hunter_calls} hunter calls + up to {args.max_judge} judge calls")
+    print(f"scope profile: {scope['name']} ({scope['source']})")
     print(f"judge mode: {judge_mode}" + (" (judge annotates; nothing it says removes a candidate)" if judge_mode == "advisory" else " (judge kills are removed from the default scored set)"))
 
     if args.dry_run:
@@ -146,10 +194,13 @@ async def scan(args) -> int:
             print(f"  {lens.id:4} {lens.kind:8} {lens.title}")
         return 0
 
-    router = Router(models_path=args.models, local_only=args.local_only, seed=args.seed, fresh=args.fresh)
+    router = Router(
+        models_path=args.models, local_only=args.local_only, seed=args.seed, fresh=args.fresh,
+        cache_any_model=parse_cache_any_model(getattr(args, "cache_any_model", None)),
+    )
 
     # --- MAP ---
-    raw_maps = await asyncio.gather(*(mapper(router, kb, c, notes_text) for c in chunks))
+    raw_maps = await asyncio.gather(*(mapper(router, kb, c, notes_text, scope_rules=scope["text"]) for c in chunks))
     merged_map = _merge_maps(raw_maps)
     map_text = _map_text(merged_map, args.map_cap)
 
@@ -168,7 +219,10 @@ async def scan(args) -> int:
         already = [f"{c['title']} ({c['location']})" for c in found]
         temp = args.temp + 0.15 * p
         tasks = [
-            hunter(router, kb, lens, c, pmap=map_text, known=known_text, killed=killed_text, already=already, temp=temp)
+            hunter(
+                router, kb, lens, c, pmap=map_text, known=known_text, killed=killed_text, already=already,
+                temp=temp, scope_rules=scope["text"], notes=notes_text,
+            )
             for c in chunks
             for lens in lenses
         ]
@@ -193,48 +247,18 @@ async def scan(args) -> int:
     hard_ids = set(verdicts)
 
     # --- JUDGE QUEUE ---
-    queue.sort(key=lambda c: (-c.get("votes", 1), SEV_RANK[c["severity"]], -c.get("confidence", 0.5)))
-    overflow, queue = queue[args.max_judge:], queue[: args.max_judge]
-    for c in overflow:
-        verdicts[c["id"]] = Verdict(verdict="needs_poc", reason="not judged (over --max-judge)")
+    queue, overflow_verdicts = judge_queue(queue, args.max_judge)
+    verdicts.update(overflow_verdicts)
 
     contexts = {c["id"]: judge_context(c["location"], files, args.judge_budget) for c in queue}
 
     # --- JUDGE ---
-    judge1 = await asyncio.gather(
-        *(
-            judge(
-                router, kb, "judge", c, contexts[c["id"]], pmap=map_text, known=known_text,
-                killed=killed_text, cache_salt=_cited_salt(c),
-            )
-            for c in queue
+    verdicts.update(
+        await run_judges(
+            router, kb, queue, contexts, map_text=map_text, known=known_text, killed=killed_text,
+            notes=notes_text, scope_rules=scope["text"], no_judge2=args.no_judge2,
         )
     )
-    for c, verdict in zip(queue, judge1):
-        verdicts[c["id"]] = verdict
-
-    keeps = [c for c in queue if verdicts[c["id"]].verdict == "keep"]
-    if not args.no_judge2 and not router.has("judge2") and keeps:
-        print(f"judge2: no target configured — {len(keeps)} keeps are single-judge, no dissent signal")
-    if not args.no_judge2 and router.has("judge2") and keeps:
-        judge2 = await asyncio.gather(
-            *(
-                judge(
-                    router, kb, "judge2", c, contexts[c["id"]], pmap=map_text, known=known_text,
-                    killed=killed_text, cache_salt=_cited_salt(c),
-                )
-                for c in keeps
-            )
-        )
-        for c, v2 in zip(keeps, judge2):
-            if v2.verdict == "kill":
-                v1 = verdicts[c["id"]]
-                verdicts[c["id"]] = Verdict(
-                    verdict="needs_poc",
-                    reason=f"{v1.reason} || JUDGE2 DISSENT: {v2.reason}",
-                    severity=v1.severity,
-                    killed_by=v1.killed_by,
-                )
 
     # --- POC ---
     refs_text = poc_refs(kb.lenses)
@@ -250,7 +274,7 @@ async def scan(args) -> int:
     ]
     poc_results = await asyncio.gather(
         *(
-            poc(router, kb, c, ctx, framework=fw, refs=refs_text)
+            poc(router, kb, c, ctx, framework=fw, refs=refs_text, scope_rules=scope["text"])
             for c, ctx, fw in zip(poc_targets, poc_code_ctx, poc_frameworks)
         )
     )
@@ -271,7 +295,10 @@ async def scan(args) -> int:
         if c["id"] in poc_paths:
             entry["poc_path"] = str(poc_paths[c["id"]])
         findings_out.append(entry)
-    write_findings(run_dir, judge_mode, _cited_provenance(provenance_all, deduped), findings_out)
+    write_findings(
+        run_dir, judge_mode, _cited_provenance(provenance_all, deduped), findings_out,
+        scope=scope, seed=args.seed, lenses=args.lenses, passes=args.passes, scope_globs=scope_globs,
+    )
 
     (run_dir / "report.md").write_text(_render_report(args.target, deduped, verdicts, files, judge_mode, hard_ids))
 
@@ -381,3 +408,104 @@ def _render_report(target, deduped, verdicts, files, judge_mode="advisory", hard
             lines.append(f"- {c['id']} ({c['title']}): killed_by={v.killed_by} — {v.reason}")
 
     return "\n".join(lines)
+
+
+def _verdict_counts(candidates: list, verdicts: dict, hard_ids) -> dict:
+    return {
+        v: sum(1 for c in candidates if c["id"] not in hard_ids and verdicts[c["id"]].verdict == v)
+        for v in ("keep", "kill", "needs_poc")
+    }
+
+
+async def rejudge(args) -> int:
+    """Re-run ONLY the judge stage on a finished run and write a new run dir.
+
+    Hunting is the expensive, free-tier-rate-limited half; judge prompts and scope rules are
+    what you iterate on. This reads findings.json, refuses if the code on disk no longer
+    matches the provenance recorded when the hunter read it (a judge must not read different
+    code than was cited), and re-judges the same candidates under the given scope rules.
+    """
+    src_dir = Path(args.run_dir)
+    try:
+        meta, findings = read_findings(src_dir)
+        map_doc = json.loads((src_dir / "map.json").read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"rejudge: cannot read the run: {exc}")
+        return 1
+
+    provenance = meta.get("provenance")
+    if not provenance:
+        print("rejudge: this run predates provenance, so the code it read can't be verified; re-scan instead")
+        return 1
+    problems = check_provenance(provenance)
+    if problems:
+        print("rejudge REFUSED: the working tree no longer matches what the hunter read:")
+        for p in problems:
+            print(f"  - {p}")
+        return 1
+
+    judge_mode = getattr(args, "judge_mode", "advisory")
+    if judge_mode not in JUDGE_MODES:
+        print(f"unknown --judge-mode {judge_mode!r} (expected one of {', '.join(JUDGE_MODES)})")
+        return 1
+    try:
+        scope = resolve_scope(getattr(args, "scope_profile", DEFAULT_PROFILE), getattr(args, "scope_rules", None))
+    except (OSError, ValueError) as exc:
+        print(f"scope rules: {exc}")
+        return 1
+
+    kb = load_kb(args.kb)
+    known_text = _read_text_or_empty(args.known)
+    notes_text = _read_text_or_empty(args.notes)
+    scope_globs = meta.get("scope_globs")
+    files, _ = load(provenance["target"], scope_globs)
+    merged_map = map_doc.get("map") if isinstance(map_doc, dict) else None
+    map_text = _map_text(merged_map, args.map_cap) if isinstance(merged_map, dict) and "summary" in merged_map else ""
+
+    carried_hard = {f["id"] for f in findings if is_hard_kill(f)}
+    verdicts = {f["id"]: Verdict(**f["verdict"]) for f in findings if f["id"] in carried_hard}
+    live = [f for f in findings if f["id"] not in carried_hard]
+    queue, new_hard = citation_gate(live, files)
+    verdicts.update(new_hard)
+    hard_ids = carried_hard | set(new_hard)
+    queue, overflow_verdicts = judge_queue(queue, args.max_judge)
+    verdicts.update(overflow_verdicts)
+
+    print(f"rejudging {len(queue)} of {len(findings)} candidates from {src_dir} "
+          f"(carried over {len(carried_hard)} gate kills) under scope profile: {scope['name']} ({scope['source']})")
+    router = Router(
+        models_path=args.models, local_only=args.local_only, seed=meta.get("seed", 0), fresh=args.fresh,
+        cache_any_model=parse_cache_any_model(getattr(args, "cache_any_model", None)),
+    )
+    contexts = {c["id"]: judge_context(c["location"], files, args.judge_budget) for c in queue}
+    verdicts.update(
+        await run_judges(
+            router, kb, queue, contexts, map_text=map_text, known=known_text, killed="",
+            notes=notes_text, scope_rules=scope["text"], no_judge2=args.no_judge2,
+        )
+    )
+
+    run_dir = Path(args.out) / (datetime.now().strftime("%Y%m%d-%H%M%S") + "-rejudge")
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "map.json").write_text(json.dumps(map_doc, indent=2, sort_keys=True))
+
+    out = []
+    for f in findings:
+        entry = {k: v for k, v in f.items() if k not in ("verdict", "poc_path", "hard_kill")}
+        entry["verdict"] = verdicts[f["id"]].model_dump()
+        entry["hard_kill"] = f["id"] in hard_ids
+        out.append(entry)
+    write_findings(
+        run_dir, judge_mode, provenance, out, scope=scope, seed=meta.get("seed", 0),
+        lenses=meta.get("lenses"), passes=meta.get("passes"), scope_globs=scope_globs,
+        rejudged_from=str(src_dir),
+    )
+    (run_dir / "report.md").write_text(
+        _render_report(provenance["target"], out, verdicts, files, judge_mode, hard_ids)
+    )
+
+    counts = _verdict_counts(out, verdicts, hard_ids)
+    print(f"judge verdicts ({judge_mode}): keep={counts['keep']} kill={counts['kill']} needs_poc={counts['needs_poc']}")
+    print(f"wrote {run_dir}")
+    print(json.dumps(router.report(), indent=2))
+    return 0

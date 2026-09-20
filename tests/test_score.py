@@ -7,7 +7,7 @@ import textwrap
 
 import pytest
 
-from hound.score import score, select_scored
+from hound.score import score, select_scored, union_scores
 from tests.mock_server import MockServer
 
 
@@ -323,3 +323,34 @@ def test_score_prints_a_cost_line_like_scan(run_dir, fake_router, capsys):
     assert _run(run_dir) == 0
     out = capsys.readouterr().out
     assert '"total_usd"' in out and '"models"' in out
+
+
+# --- union across seeds ---------------------------------------------------------------------
+
+
+def _scored_run(tmp_path, name, seed, verdicts):
+    d = tmp_path / name
+    d.mkdir()
+    (d / "findings.json").write_text(json.dumps({"seed": seed, "judge_mode": "advisory", "findings": []}))
+    exact = sum(v == "EXACT" for v in verdicts.values())
+    partial = sum(v == "PARTIAL" for v in verdicts.values())
+    (d / "score.json").write_text(json.dumps({
+        "weighted_recall_pct": (exact + 0.5 * partial) / len(verdicts) * 100,
+        "scores": [{"gt_id": g, "verdict": v} for g, v in verdicts.items()],
+    }))
+    return d
+
+
+def test_union_counts_a_bug_found_by_any_seed_at_its_best_verdict(tmp_path):
+    a = _scored_run(tmp_path, "s1", 1, {"H-01": "EXACT", "M-01": "MISS", "M-02": "PARTIAL", "M-03": "MISS"})
+    b = _scored_run(tmp_path, "s2", 2, {"H-01": "MISS", "M-01": "MISS", "M-02": "EXACT", "M-03": "MISS"})
+    c = _scored_run(tmp_path, "s3", 3, {"H-01": "EXACT", "M-01": "MISS", "M-02": "MISS", "M-03": "PARTIAL"})
+
+    result = union_scores([a, b, c])
+
+    assert [r["weighted_recall_pct"] for r in result["per_run"]] == [pytest.approx(37.5), pytest.approx(25.0), pytest.approx(37.5)]
+    assert result["best"] == {"H-01": "EXACT", "M-01": "MISS", "M-02": "EXACT", "M-03": "PARTIAL"}
+    assert result["union"]["weighted_recall_pct"] == pytest.approx((2 + 0.5) / 4 * 100)
+    # M-02 was caught by two seeds, M-03 by exactly one (s3), H-01 by two
+    assert result["only_one_run"] == {"M-03": "s3 (seed 3)"}
+    assert result["found_by"]["M-01"] == []

@@ -34,6 +34,23 @@ DEFAULT_MAX_TOKENS = {
     "scorer": 24000,
 }
 FALLBACK_MAX_TOKENS = 2048
+
+# Roles whose cache key ignores the model id: any prior reply to the same prompt is replayed no
+# matter which provider produced it. For the free hunt-side roles that keeps a rerun's candidate
+# set stable (a fallback-served reply used to be cached under the fallback's id, so the next run
+# tried the primary first, missed, and re-sampled). judge/scorer stay model-specific: a verdict
+# depends on who gave it.
+DEFAULT_CACHE_ANY_MODEL = ("mapper", "hunter", "poc")
+
+
+def parse_cache_any_model(value) -> frozenset:
+    """CLI value -> role set. None -> defaults; "" or "none" -> no roles; "a,b" -> those roles."""
+    if value is None:
+        return frozenset(DEFAULT_CACHE_ANY_MODEL)
+    value = value.strip()
+    if value.lower() in ("", "none"):
+        return frozenset()
+    return frozenset(r.strip() for r in value.split(",") if r.strip())
 TRUNCATION_RATIO = 0.95
 
 
@@ -147,8 +164,10 @@ class Router:
         seed: int = 0,
         fresh: bool = False,
         budget=None,
+        cache_any_model=DEFAULT_CACHE_ANY_MODEL,
     ):
         config = yaml.safe_load(Path(models_path).read_text())
+        self.cache_any_model = frozenset(cache_any_model)
         self.local_only = local_only
         self.seed = seed
         self.fresh = fresh
@@ -318,7 +337,8 @@ class Router:
         for target, provider in self.targets(role):
             model = target["model"]
             extra = target.get("extra") or {}
-            key = cache_key(model, system, user, temperature, self.seed, cache_salt)
+            key_model = "*" if role in self.cache_any_model else model
+            key = cache_key(key_model, system, user, temperature, self.seed, cache_salt)
             path = self.cache_dir / f"{key}.txt"
 
             if not self.fresh and path.exists():

@@ -29,6 +29,8 @@ def is_hard_kill(finding: dict) -> bool:
     return (finding.get("verdict") or {}).get("killed_by") in (CITATION_GATE, STALE_CITATION)
 
 
-def write_findings(run_dir, judge_mode: str, provenance: dict, findings: list) -> None:
-    doc = {"judge_mode": judge_mode, "provenance": provenance, "findings": findings}
+def write_findings(run_dir, judge_mode: str, provenance: dict, findings: list, **meta) -> None:
+    """`meta` (scope profile, seed, lenses, passes, ...) is stored beside the findings so a
+    run's numbers stay interpretable later."""
+    doc = {**meta, "judge_mode": judge_mode, "provenance": provenance, "findings": findings}
     (Path(run_dir) / "findings.json").write_text(json.dumps(doc, indent=2, sort_keys=True))
