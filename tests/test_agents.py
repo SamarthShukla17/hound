@@ -186,3 +186,13 @@ def test_poc_prompt_starts_with_code(kb):
     code = "  1| contract Vault {}\n  2| }"
     asyncio.run(poc(r, kb, {"title": "x"}, code, refs="// some skeleton"))
     assert r.calls[0]["user"].startswith(code)
+
+
+def test_poc_prompt_demands_a_self_contained_compilable_file(kb):
+    r = FakeRouter(chat_result="ok")
+    asyncio.run(poc(r, kb, {"title": "x"}, "  1| contract Vault {}"))
+    user = r.calls[0]["user"]
+    assert "self-contained and compilable" in user
+    assert "define it in full in this file" in user
+    assert "fallback/receive" in user
+    assert "Nothing that does not compile is a PoC" in user
