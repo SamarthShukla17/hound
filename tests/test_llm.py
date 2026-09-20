@@ -7,7 +7,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from hound.llm import OutOfCredits, Provider, Router, cache_key, extract_json, parse_cache_any_model
+from hound.llm import (
+    CallCeilingExceeded, OutOfCredits, Provider, Router, cache_key, extract_json, parse_cache_any_model,
+)
 
 FIXTURE_MODELS_YAML = textwrap.dedent(
     """
@@ -155,7 +157,7 @@ def test_400_mentioning_temperature_retries_once_without_it(models_yaml, monkeyp
     router = Router(models_path=str(models_yaml))
     calls = []
 
-    async def fake_complete(self, *, model, messages, temperature, max_tokens, extra=None):
+    async def fake_complete(self, *, model, messages, temperature, max_tokens, extra=None, **kw):
         calls.append(temperature)
         if temperature is not None:
             raise FakeAPIError(400, "Unsupported value: 'temperature' is not supported")
@@ -213,7 +215,7 @@ def test_max_tokens_precedence_target_over_role_map_over_default(tmp_path, monke
     router = Router(models_path=str(path), fresh=True)
     sent = {}
 
-    async def fake_complete(self, *, model, messages, temperature, max_tokens, extra=None):
+    async def fake_complete(self, *, model, messages, temperature, max_tokens, extra=None, **kw):
         sent["max_tokens"] = max_tokens
         return _resp("ok", 5)
 
@@ -230,7 +232,7 @@ def test_max_tokens_precedence_target_over_role_map_over_default(tmp_path, monke
 def test_empty_reply_at_the_token_cap_is_reported_as_truncation(models_yaml, monkeypatch, capsys):
     router = Router(models_path=str(models_yaml), fresh=True)
 
-    async def fake_complete(self, *, model, messages, temperature, max_tokens, extra=None):
+    async def fake_complete(self, *, model, messages, temperature, max_tokens, extra=None, **kw):
         return _resp("", completion_tokens=max_tokens, finish_reason="length")
 
     monkeypatch.setattr(Provider, "complete", fake_complete)
@@ -245,7 +247,7 @@ def test_empty_reply_at_the_token_cap_is_reported_as_truncation(models_yaml, mon
 def test_empty_reply_well_under_the_cap_is_a_plain_empty_reply(models_yaml, monkeypatch, capsys):
     router = Router(models_path=str(models_yaml), fresh=True)
 
-    async def fake_complete(self, *, model, messages, temperature, max_tokens, extra=None):
+    async def fake_complete(self, *, model, messages, temperature, max_tokens, extra=None, **kw):
         return _resp("", completion_tokens=3, finish_reason="stop")
 
     monkeypatch.setattr(Provider, "complete", fake_complete)
@@ -260,7 +262,7 @@ def test_empty_reply_well_under_the_cap_is_a_plain_empty_reply(models_yaml, monk
 def test_report_includes_per_call_token_detail(models_yaml, monkeypatch):
     router = Router(models_path=str(models_yaml), fresh=True)
 
-    async def fake_complete(self, *, model, messages, temperature, max_tokens, extra=None):
+    async def fake_complete(self, *, model, messages, temperature, max_tokens, extra=None, **kw):
         return _resp("hello", completion_tokens=42)
 
     monkeypatch.setattr(Provider, "complete", fake_complete)
@@ -281,7 +283,7 @@ def test_a_salted_call_never_serves_an_entry_cached_for_different_file_contents(
     router = Router(models_path=str(models_yaml))
     calls = {"n": 0}
 
-    async def fake_complete(self, *, model, messages, temperature, max_tokens, extra=None):
+    async def fake_complete(self, *, model, messages, temperature, max_tokens, extra=None, **kw):
         calls["n"] += 1
         return _resp(f"verdict about version {calls['n']}", 5)
 
@@ -299,7 +301,7 @@ def test_a_salted_call_never_serves_an_entry_cached_for_different_file_contents(
 def test_a_reply_cut_off_at_max_tokens_is_returned_but_never_cached(models_yaml, monkeypatch, capsys):
     router = Router(models_path=str(models_yaml))
 
-    async def fake_complete(self, *, model, messages, temperature, max_tokens, extra=None):
+    async def fake_complete(self, *, model, messages, temperature, max_tokens, extra=None, **kw):
         return _resp('{"findings": [', completion_tokens=max_tokens, finish_reason="length")
 
     monkeypatch.setattr(Provider, "complete", fake_complete)
@@ -343,7 +345,7 @@ def test_a_reply_from_another_configured_model_is_replayed_across_providers(tmp_
     router = _cache_any_router(tmp_path, monkeypatch)
     calls = []
 
-    async def fake_complete(self, *, model, messages, temperature, max_tokens, extra=None):
+    async def fake_complete(self, *, model, messages, temperature, max_tokens, extra=None, **kw):
         calls.append(model)
         return _resp("reply", 5)
 
@@ -359,7 +361,7 @@ def test_a_reply_from_a_model_no_longer_configured_for_the_role_is_not_replayed(
     router = _cache_any_router(tmp_path, monkeypatch)
     calls = []
 
-    async def fake_complete(self, *, model, messages, temperature, max_tokens, extra=None):
+    async def fake_complete(self, *, model, messages, temperature, max_tokens, extra=None, **kw):
         calls.append(model)
         return _resp("fresh reply", 5)
 
@@ -381,7 +383,7 @@ def test_a_reply_from_a_model_no_longer_configured_for_the_role_is_not_replayed(
 def test_a_model_agnostic_entry_with_no_recorded_model_cannot_be_verified_so_it_is_not_replayed(tmp_path, monkeypatch):
     router = _cache_any_router(tmp_path, monkeypatch)
 
-    async def fake_complete(self, *, model, messages, temperature, max_tokens, extra=None):
+    async def fake_complete(self, *, model, messages, temperature, max_tokens, extra=None, **kw):
         return _resp("fresh reply", 5)
 
     monkeypatch.setattr(Provider, "complete", fake_complete)
@@ -392,7 +394,7 @@ def test_a_model_agnostic_entry_with_no_recorded_model_cannot_be_verified_so_it_
 def test_every_new_cache_entry_records_the_model_and_provider_that_answered(tmp_path, monkeypatch):
     router = _cache_any_router(tmp_path, monkeypatch)
 
-    async def fake_complete(self, *, model, messages, temperature, max_tokens, extra=None):
+    async def fake_complete(self, *, model, messages, temperature, max_tokens, extra=None, **kw):
         return _resp("reply", 5)
 
     monkeypatch.setattr(Provider, "complete", fake_complete)
@@ -405,7 +407,7 @@ def test_judge_cache_stays_model_specific(tmp_path, monkeypatch):
     router = _cache_any_router(tmp_path, monkeypatch)
     calls = []
 
-    async def fake_complete(self, *, model, messages, temperature, max_tokens, extra=None):
+    async def fake_complete(self, *, model, messages, temperature, max_tokens, extra=None, **kw):
         calls.append(model)
         return _resp("fresh verdict", 5)
 
@@ -419,7 +421,7 @@ def test_judge_cache_stays_model_specific(tmp_path, monkeypatch):
 def test_cache_any_model_none_restores_model_specific_hunter_keys(tmp_path, monkeypatch):
     router = _cache_any_router(tmp_path, monkeypatch, cache_any_model=parse_cache_any_model("none"))
 
-    async def fake_complete(self, *, model, messages, temperature, max_tokens, extra=None):
+    async def fake_complete(self, *, model, messages, temperature, max_tokens, extra=None, **kw):
         return _resp("fresh", 5)
 
     monkeypatch.setattr(Provider, "complete", fake_complete)
@@ -443,7 +445,7 @@ def test_a_402_raises_out_of_credits_instead_of_falling_back_to_the_next_target(
     router = Router(models_path=str(models_yaml))
     tried = []
 
-    async def fake_complete(self, *, model, messages, temperature, max_tokens, extra=None):
+    async def fake_complete(self, *, model, messages, temperature, max_tokens, extra=None, **kw):
         tried.append(model)
         raise FakeAPIError(402, "This request requires more credits, or fewer max_tokens")
 
@@ -459,7 +461,7 @@ def test_a_402_is_not_retried_with_backoff_like_a_429(models_yaml, monkeypatch, 
     router = Router(models_path=str(models_yaml))
     calls = {"n": 0}
 
-    async def fake_complete(self, *, model, messages, temperature, max_tokens, extra=None):
+    async def fake_complete(self, *, model, messages, temperature, max_tokens, extra=None, **kw):
         calls["n"] += 1
         raise FakeAPIError(402, "insufficient credits")
 
@@ -475,7 +477,7 @@ def test_other_payment_ish_errors_still_use_the_normal_fallback(models_yaml, mon
     router = Router(models_path=str(models_yaml))
     calls = {"n": 0}
 
-    async def fake_complete(self, *, model, messages, temperature, max_tokens, extra=None):
+    async def fake_complete(self, *, model, messages, temperature, max_tokens, extra=None, **kw):
         calls["n"] += 1
         if calls["n"] == 1:
             raise FakeAPIError(429, "rate limited")
@@ -488,3 +490,131 @@ def test_other_payment_ish_errors_still_use_the_normal_fallback(models_yaml, mon
     monkeypatch.setattr("hound.llm.asyncio.sleep", no_sleep)
     assert asyncio.run(router.chat("test_role", "s", "u")) == "recovered"
     assert calls["n"] == 2  # retried, unlike a 402
+
+
+# --- the call ceiling must bound the HTTP attempt, never the queue wait ----------------------
+
+SERIAL_YAML = textwrap.dedent(
+    """
+    providers:
+      serial: {base_url: "http://example.invalid/v1", key_env: TEST_KEY_PRESENT, rpm: 100000, concurrency: 1, timeout: 30}
+    roles:
+      hunter: [{provider: serial, model: m}]
+    prices: {}
+    """
+)
+
+
+def _serial_router(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("TEST_KEY_PRESENT", "secret")
+    path = tmp_path / "models.yaml"
+    path.write_text(SERIAL_YAML)
+    return Router(models_path=str(path), fresh=True)
+
+
+def test_queued_calls_on_a_serial_provider_are_not_killed_for_waiting_their_turn(tmp_path, monkeypatch):
+    """REGRESSION GUARD. 14 lenses dispatched at once against concurrency:1 means 13 sit in the
+    queue. Charging them for the wait killed 13 of 14 lenses on a real bench run, each having
+    never sent a request. Aggregate runtime here (10 x 0.1s) far exceeds the 0.25s ceiling, and
+    every call must still complete."""
+    router = _serial_router(tmp_path, monkeypatch)
+    n, per_call, ceiling = 10, 0.1, 0.25
+    concurrent = {"now": 0, "max": 0}
+
+    async def fake_complete(self, *, model, messages, temperature, max_tokens, extra=None, role="", on_slot=None):
+        self._ensure_sync_primitives()
+        async with self._semaphore:          # the real serialisation
+            if on_slot is not None:
+                on_slot()                     # budget starts HERE, not at task creation
+            concurrent["now"] += 1
+            concurrent["max"] = max(concurrent["max"], concurrent["now"])
+            await asyncio.sleep(per_call)
+            concurrent["now"] -= 1
+        return _resp("ok", 5)
+
+    monkeypatch.setattr(Provider, "complete", fake_complete)
+
+    async def run_all():
+        return await asyncio.gather(*(
+            router.chat("hunter", "s", f"lens-{i}", ceiling=ceiling) for i in range(n)
+        ))
+
+    results = asyncio.run(run_all())
+
+    assert results == ["ok"] * n          # ALL complete; none killed for queueing
+    assert concurrent["max"] == 1         # the provider really was serial
+
+
+def _fake_client(delay=0.0, hang=False):
+    """Stands in for AsyncOpenAI so the REAL Provider.complete (timeout + queue logging) runs.
+
+    `hang` waits on an Event that is never set, so a test that patches asyncio.sleep to skip
+    backoff waits cannot accidentally un-hang it.
+    """
+
+    class FakeClient:
+        class chat:
+            class completions:
+                @staticmethod
+                async def create(**kwargs):
+                    if hang:
+                        await asyncio.Event().wait()
+                    await asyncio.sleep(delay)
+                    return _resp("ok", 5)
+
+    return FakeClient()
+
+
+def test_a_stalled_http_attempt_is_bounded_by_the_provider_timeout_not_the_ceiling(tmp_path, monkeypatch):
+    """A call that hangs holding the slot is cut off by the per-attempt provider timeout
+    (30s in this fixture, 0.1s here), which is what bounds a stall; the ceiling then stops
+    the retries."""
+    router = _serial_router(tmp_path, monkeypatch)
+    provider = router.providers["serial"]
+    provider.cfg["timeout"] = 0.1
+    provider.client = _fake_client(hang=True)  # never returns
+
+    async def no_sleep(_s):
+        return None
+
+    monkeypatch.setattr("hound.llm.asyncio.sleep", no_sleep)  # skip backoff waits
+    with pytest.raises(RuntimeError) as excinfo:
+        asyncio.run(router.chat("hunter", "s", "u", ceiling=5))
+
+    # It terminated instead of hanging forever: the attempt was cut at the provider timeout,
+    # then the ceiling stopped the retries.
+    assert "budget exhausted" in str(excinfo.value) or "timeout" in str(excinfo.value).lower()
+
+
+def test_the_ceiling_stops_further_retries_once_the_budget_is_spent(tmp_path, monkeypatch, capsys):
+    router = _serial_router(tmp_path, monkeypatch)
+    attempts = {"n": 0}
+
+    async def fails_slowly(self, *, model, messages, temperature, max_tokens, extra=None, role="", on_slot=None):
+        if on_slot is not None:
+            on_slot()
+        attempts["n"] += 1
+        await asyncio.sleep(0.12)
+        raise FakeAPIError(500, "server error")
+
+    monkeypatch.setattr(Provider, "complete", fails_slowly)
+    with pytest.raises(RuntimeError):
+        asyncio.run(router.chat("hunter", "s", "u", ceiling=0.2))
+
+    assert attempts["n"] < 3  # gave up early instead of burning all three retries
+    assert "CALL CEILING" in capsys.readouterr().out
+
+
+def test_a_queued_call_logs_that_it_is_waiting_rather_than_looking_hung(tmp_path, monkeypatch, capsys):
+    """The ambiguity between "busy" and "hung" is what prompted the ceiling in the first place."""
+    router = _serial_router(tmp_path, monkeypatch)
+    router.providers["serial"].client = _fake_client(delay=0.05)
+
+    async def run_three():
+        return await asyncio.gather(*(router.chat("hunter", "s", f"u{i}") for i in range(3)))
+
+    assert asyncio.run(run_three()) == ["ok"] * 3
+    out = capsys.readouterr().out
+    assert "queued:" in out and "waiting for a slot (concurrency 1)" in out
+    assert "hunter" in out  # the role is named, so a slow lens is identifiable

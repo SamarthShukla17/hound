@@ -139,19 +139,31 @@ def test_a_reply_without_a_findings_list_is_a_failure_not_a_clean_negative(kb):
     assert result.ok is False and "no findings list" in result.error
 
 
-def test_a_hunter_call_that_exceeds_the_wall_clock_ceiling_is_abandoned(kb, capsys):
-    """One slow lens must not stall a whole chain, and its silence must not read as a clean
-    negative."""
+def test_a_lens_whose_call_hits_the_routers_ceiling_is_recorded_as_failed(kb):
+    """The ceiling itself lives in the router (it must start at slot acquisition, not task
+    creation). The hunter's job is only to report the resulting failure as a failure, so the
+    lens is never mistaken for a clean negative."""
+    from hound.llm import CallCeilingExceeded
 
-    class SlowRouter:
+    class CeilingRouter:
         async def chat_json(self, *a, **kw):
-            await asyncio.sleep(10)
-            return {"findings": []}
+            raise RuntimeError(f"all targets failed for role 'hunter': {CallCeilingExceeded('300s budget exhausted')}")
 
-    result = asyncio.run(hunter(SlowRouter(), kb, kb.lenses[0], "  1| x", ceiling=0.05))
-    assert result.ok is False and "timeout" in result.error
-    out = capsys.readouterr().out
-    assert "hunter (A5) EXCEEDED" in out and "lens abandoned" in out
+    result = asyncio.run(hunter(CeilingRouter(), kb, kb.lenses[0], "  1| x"))
+    assert result.ok is False and result.findings == []
+    assert "budget exhausted" in result.error
+
+
+def test_hunter_no_longer_wraps_its_own_call_in_a_wall_clock_timeout(kb):
+    """Regression guard: wrapping the whole coroutine charged a lens for QUEUE time and killed
+    13 of 14 lenses on a concurrency:1 provider for waiting their turn."""
+    import inspect
+
+    from hound import agents
+
+    src = inspect.getsource(agents.hunter)
+    assert "wait_for" not in src
+    assert "ceiling" not in inspect.signature(agents.hunter).parameters
 
 
 def test_hunter_prompt_starts_with_code_and_mentions_only_its_lens(kb):

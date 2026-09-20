@@ -46,6 +46,17 @@ DEFAULT_MAX_TOKENS = {
 }
 FALLBACK_MAX_TOKENS = 2048
 
+# Budget for ONE logical call, measured from the moment it acquires a provider slot — never
+# from when the coroutine was created. On a concurrency:1 provider, N lenses are dispatched at
+# once and N-1 sit in the queue; charging them for waiting their turn kills them for being
+# patient (measured 2026-09-20: 13 of 14 lenses "timed out" having never sent a request).
+# Covers the HTTP attempt plus its retries and backoff sleeps.
+CALL_CEILING_SECONDS = 300
+
+
+class CallCeilingExceeded(Exception):
+    """A logical call used its whole budget after acquiring a slot (not while queued)."""
+
 # Roles whose cache key ignores the model id: any prior reply to the same prompt is replayed no
 # matter which provider produced it. For the free hunt-side roles that keeps a rerun's candidate
 # set stable (a fallback-served reply used to be cached under the fallback's id, so the next run
@@ -122,6 +133,7 @@ class Provider:
         self._semaphore = None
         self._rpm_lock = None
         self._next_allowed = 0.0
+        self._waiting = 0
 
     def _ensure_sync_primitives(self):
         if self._semaphore is None:
@@ -154,15 +166,37 @@ class Provider:
         if wait > 0:
             await asyncio.sleep(wait)
 
-    async def complete(self, *, model, messages, temperature, max_tokens, extra=None):
+    async def complete(self, *, model, messages, temperature, max_tokens, extra=None, role="", on_slot=None):
+        """Wait for a slot, then make ONE HTTP attempt bounded by the provider's timeout.
+
+        `on_slot` fires the moment the slot is acquired, so a caller can start its budget
+        there rather than counting the queue wait against the call.
+        """
         self._ensure_sync_primitives()
-        async with self._semaphore:
-            await self._throttle()
-            kwargs = dict(model=model, messages=messages, max_tokens=max_tokens)
-            kwargs.update(extra or {})
-            if temperature is not None:
-                kwargs["temperature"] = temperature
-            return await self.client.chat.completions.create(**kwargs)
+        queued = self._semaphore.locked()
+        if queued:
+            self._waiting += 1
+            # A serial provider that is merely busy should look busy, not hung.
+            print(
+                f"[llm] queued: {role or 'call'} {self.name}/{model} — {self._waiting} waiting "
+                f"for a slot (concurrency {self.cfg.get('concurrency', 1)})"
+            )
+        try:
+            async with self._semaphore:
+                await self._throttle()
+                if on_slot is not None:
+                    on_slot()
+                kwargs = dict(model=model, messages=messages, max_tokens=max_tokens)
+                kwargs.update(extra or {})
+                if temperature is not None:
+                    kwargs["temperature"] = temperature
+                return await asyncio.wait_for(
+                    self.client.chat.completions.create(**kwargs),
+                    timeout=self.cfg.get("timeout", 60),
+                )
+        finally:
+            if queued:
+                self._waiting -= 1
 
 
 class Router:
@@ -269,11 +303,22 @@ class Router:
             stats["prompt_tokens"] += getattr(usage, "prompt_tokens", 0) or 0
             stats["completion_tokens"] += getattr(usage, "completion_tokens", 0) or 0
 
-    async def _call_with_retries(self, provider, model, messages, temperature, max_tokens, extra, role=""):
+    async def _call_with_retries(
+        self, provider, model, messages, temperature, max_tokens, extra, role="", ceiling=CALL_CEILING_SECONDS
+    ):
         cur_temperature = temperature
         retried_without_temperature = False
         last_error = None
         started = time.monotonic()
+        # Set on the FIRST slot acquisition, so queue time is never charged to the call.
+        budget = {"deadline": None}
+
+        def slot_acquired():
+            if budget["deadline"] is None and ceiling:
+                budget["deadline"] = time.monotonic() + ceiling
+
+        def out_of_budget() -> bool:
+            return budget["deadline"] is not None and time.monotonic() >= budget["deadline"]
 
         for attempt in range(3):
             try:
@@ -283,11 +328,23 @@ class Router:
                     temperature=cur_temperature,
                     max_tokens=max_tokens,
                     extra=extra,
+                    role=role,
+                    on_slot=slot_acquired,
                 )
             except Exception as exc:  # noqa: BLE001 - openai raises many subtypes
                 status = getattr(exc, "status_code", None)
                 message = str(exc)
                 last_error = exc
+
+                if isinstance(exc, asyncio.TimeoutError):
+                    message = f"HTTP attempt exceeded the provider timeout ({provider.cfg.get('timeout', 60)}s)"
+                    last_error = TimeoutError(message)
+
+                if out_of_budget():
+                    print(f"[llm] CALL CEILING: {role or 'call'} {provider.name}/{model} used its "
+                          f"{ceiling:.0f}s budget after acquiring a slot; giving up on this target")
+                    last_error = CallCeilingExceeded(f"{ceiling:.0f}s budget exhausted: {str(last_error)[:120]}")
+                    break
 
                 if status == OUT_OF_CREDITS_STATUS:
                     raise OutOfCredits(
@@ -316,6 +373,11 @@ class Router:
 
                 if attempt < 2:
                     delay = min(60, 4 * 2**attempt)
+                    if budget["deadline"] is not None and time.monotonic() + delay >= budget["deadline"]:
+                        print(f"[llm] CALL CEILING: {role or 'call'} {provider.name}/{model} cannot "
+                              f"fit another retry in its {ceiling:.0f}s budget")
+                        last_error = CallCeilingExceeded(f"{ceiling:.0f}s budget exhausted before retry")
+                        break
                     print(
                         f"[llm] BACKOFF {provider.name}/{model}: status={status} "
                         f"retry {attempt + 1}/2 in {delay}s"
@@ -360,6 +422,7 @@ class Router:
         temperature: float = 0.3,
         max_tokens: int | None = None,
         cache_salt: str = "",
+        ceiling: float = CALL_CEILING_SECONDS,
     ) -> str:
         messages = [
             {"role": "system", "content": system},
@@ -386,7 +449,7 @@ class Router:
 
             resolved_max_tokens = self._resolve_max_tokens(role, target, max_tokens)
             text, error, meta = await self._call_with_retries(
-                provider, model, messages, temperature, resolved_max_tokens, extra, role
+                provider, model, messages, temperature, resolved_max_tokens, extra, role, ceiling
             )
             if error is not None:
                 print(f"[llm] {provider.name}/{model} failed for role {role!r}: {error}")

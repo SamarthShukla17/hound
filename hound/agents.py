@@ -26,7 +26,6 @@ EVIDENCE_RULES = """EVIDENCE RULES
 
 # A lens that fails and a lens that legitimately finds nothing both used to return [], so a
 # recall hole looked identical to a clean negative. HuntResult keeps them distinct.
-HUNTER_WALL_CLOCK_CEILING = 300
 
 
 @dataclass
@@ -111,7 +110,7 @@ async def mapper(r, kb, code: str, notes: str = "", scope=None) -> dict:
 
 async def hunter(
     r, kb, lens, code: str, pmap=None, known: str = "", killed: str = "", already=None, temp: float = 0.3,
-    cache_salt: str = "", scope=None, notes: str = "", ceiling: float = HUNTER_WALL_CLOCK_CEILING,
+    cache_salt: str = "", scope=None, notes: str = "",
 ) -> HuntResult:
     sys_prompt = system(kb, scope)
 
@@ -142,17 +141,12 @@ async def hunter(
     user = _user_prompt(code, map_block, notes_block, known_block, killed_block, already_block, lens_block, task)
 
     try:
-        data = await asyncio.wait_for(
-            r.chat_json("hunter", sys_prompt, user, temperature=temp, **_salt(cache_salt)),
-            timeout=ceiling,
-        )
+        # No wall-clock wrapper here: the budget belongs in the router, where it can start at
+        # slot acquisition. Wrapping the whole coroutine charged a lens for queue time and
+        # killed 13 of 14 lenses on a concurrency:1 provider for waiting their turn.
+        data = await r.chat_json("hunter", sys_prompt, user, temperature=temp, **_salt(cache_salt))
     except OutOfCredits:
         raise  # never degrade gracefully past an unpayable call
-    except asyncio.TimeoutError:
-        # One slow lens must not stall a whole chain, and its silence must not read as a
-        # clean negative.
-        print(f"[agents] hunter ({lens.id}) EXCEEDED the {ceiling:.0f}s wall-clock ceiling — lens abandoned")
-        return HuntResult(ok=False, error=f"timeout after {ceiling:.0f}s")
     except Exception as exc:  # noqa: BLE001
         print(f"[agents] hunter ({lens.id}) failed: {exc}")
         return HuntResult(ok=False, error=str(exc)[:200])
