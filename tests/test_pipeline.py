@@ -161,3 +161,25 @@ def test_scan_end_to_end_against_mock_server(fixture_repo, kb_dir, tmp_path, mon
         poc_files = list((out_dir / "pocs").glob(f"{valid['id']}.t.sol"))
         assert len(poc_files) == 1
         assert "// ASSUME:" in poc_files[0].read_text()
+
+
+def test_rerun_resumes_entirely_from_the_disk_cache(fixture_repo, kb_dir, tmp_path, monkeypatch):
+    """If a scan dies on rate limits, a rerun must not re-spend requests: the cache
+    key can't depend on anything that changes between runs (timestamps, run dir...)."""
+    import asyncio
+
+    monkeypatch.chdir(tmp_path)
+    with MockServer() as mock:
+        models_path = tmp_path / "models.yaml"
+        models_path.write_text(_models_yaml(mock.base_url))
+
+        args = _scan_args(
+            target=str(fixture_repo), kb=kb_dir, out=str(tmp_path / "runs"),
+            models=str(models_path), fresh=False, passes=2,
+        )
+        assert asyncio.run(scan(args)) == 0
+        after_first = mock.request_count
+        assert after_first > 0
+
+        assert asyncio.run(scan(args)) == 0
+        assert mock.request_count == after_first

@@ -6,6 +6,9 @@ budget (10), coach (11), run-pocs (12).
 
 import argparse
 import asyncio
+from pathlib import Path
+
+from dotenv import load_dotenv
 
 
 def _not_implemented(name: str):
@@ -104,6 +107,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    # Anchored to the project root, not the cwd, so keys load from any directory.
+    load_dotenv(Path(__file__).resolve().parent.parent / ".env")
     parser = build_parser()
     args = parser.parse_args()
 

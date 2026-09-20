@@ -1,3 +1,9 @@
+# FREE TIER ONLY. Every role below points at a free model; no paid target is active.
+# The paid targets (z-ai/glm-5.3-flash, gpt-5.6-luna, grok-4.6) are commented out further
+# down, ready to re-enable once the first SecondSwap score says whether a stronger judge
+# is worth paying for. Rate limits, not cost, are the constraint now: Z.ai free is roughly
+# 1 req/sec with a daily cap; OpenRouter free is ~20 req/min with a low daily cap.
+#
 # Model IDs, free tiers, and prices change often — verify each one on its provider's
 # page before relying on it. This file is a starting point, not a guarantee.
 # Last checked 2026-09-16.
@@ -11,15 +17,15 @@ providers:
   zai:
     base_url: https://api.z.ai/api/paas/v4
     key_env: ZAI_API_KEY
-    rpm: 60
-    concurrency: 4
+    rpm: 50
+    concurrency: 1
     timeout: 120
 
   openrouter:
     base_url: https://openrouter.ai/api/v1
     key_env: OPENROUTER_API_KEY
-    rpm: 20
-    concurrency: 4
+    rpm: 18
+    concurrency: 2
     timeout: 120
 
   openai:
@@ -52,8 +58,8 @@ providers:
     timeout: 120
 
 roles:
-  # Free first: the free zai tier, then OpenRouter's free pool as a last resort
-  # (it routes to a random underlying model, so it's never a first choice).
+  # openrouter/free routes to a random free model, so it's only ever a fallback (or judge2,
+  # where a different provider from the judge is the point).
   mapper:
     - {provider: zai, model: glm-4.7-flash}
     - {provider: openrouter, model: openrouter/free}
@@ -62,31 +68,36 @@ roles:
     - {provider: zai, model: glm-4.7-flash}
     - {provider: openrouter, model: openrouter/free}
 
-  # Cheapest strong model first.
+  # Temperature is already 0 for judge calls (see agents.judge).
   judge:
-    - {provider: openrouter, model: z-ai/glm-5.3-flash}
-    - {provider: openai, model: gpt-5.6-luna, extra: {reasoning_effort: high}}
+    - {provider: zai, model: glm-4.7-flash}
+    - {provider: openrouter, model: openrouter/free}
+    # PAID, re-enable later:
+    # - {provider: openrouter, model: z-ai/glm-5.3-flash}
+    # - {provider: openai, model: gpt-5.6-luna, extra: {reasoning_effort: high}}
 
-  # A different model family than judge, for an independent second opinion. Only
-  # runs on candidates that already survived judge, so the call count is small.
+  # A different provider than the judge's primary, for an independent second opinion.
   judge2:
-    - {provider: xai, model: grok-4.6}
+    - {provider: openrouter, model: openrouter/free}
+    # PAID, re-enable later:
+    # - {provider: xai, model: grok-4.6}
 
   poc:
     - {provider: zai, model: glm-4.7-flash}
-    - {provider: openrouter, model: openrouter/free}
 
   scorer:
-    - {provider: openrouter, model: z-ai/glm-5.3-flash}
     - {provider: zai, model: glm-4.7-flash}
+    # PAID, re-enable later:
+    # - {provider: openrouter, model: z-ai/glm-5.3-flash}
 
 # $ per million tokens: [input, output]. Approximate — verify before trusting cost reports.
 prices:
   openrouter/free: [0, 0]
   glm-4.7-flash: [0, 0]
-  z-ai/glm-5.3-flash: [0.05, 0.17]
-  gpt-5.6-luna: [0.20, 1.20]
-  grok-4.6: [2.0, 6.0]
+  # PAID, re-enable with the targets above:
+  # z-ai/glm-5.3-flash: [0.05, 0.17]
+  # gpt-5.6-luna: [0.20, 1.20]
+  # grok-4.6: [2.0, 6.0]
 
 budget:
   monthly_usd: 20
