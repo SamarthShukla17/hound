@@ -8,8 +8,7 @@ judge_mode="gate" (the only behaviour that existed then) with no provenance.
 import json
 from pathlib import Path
 
-CITATION_GATE = "citation gate"
-STALE_CITATION = "stale citation (file changed since hunt)"
+from .schema import CITATION_GATE, STALE_CITATION  # noqa: F401  (re-exported for callers)
 
 
 def read_findings(run_dir):

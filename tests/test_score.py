@@ -134,15 +134,19 @@ class FakeScorerRouter:
 
     responses = []
     calls = 0
+    answered_by = "z-ai/glm-5.3-flash"  # which model "answered"; tests override to force a fallback
 
     def __init__(self, models_path=None, local_only=False):
-        pass
+        self.roles = {"scorer": [{"provider": "openrouter", "model": "z-ai/glm-5.3-flash"},
+                                 {"provider": "zai", "model": "glm-4.7-flash"}]}
+        self.call_log = []
 
     def report(self):
-        return {"models": [], "total_usd": 0.0, "calls": []}
+        return {"models": [], "total_usd": 0.0, "calls": list(self.call_log)}
 
     async def chat_json(self, role, system, user, *, temperature=0.3, max_tokens=None):
         type(self).calls += 1
+        self.call_log.append({"role": role, "model": type(self).answered_by})
         item = type(self).responses.pop(0)
         if isinstance(item, Exception):
             raise item
@@ -152,6 +156,7 @@ class FakeScorerRouter:
 @pytest.fixture
 def fake_router(monkeypatch):
     FakeScorerRouter.responses, FakeScorerRouter.calls = [], 0
+    FakeScorerRouter.answered_by = "z-ai/glm-5.3-flash"
     monkeypatch.setattr("hound.score.Router", FakeScorerRouter)
     slept = []
 
@@ -354,3 +359,41 @@ def test_union_counts_a_bug_found_by_any_seed_at_its_best_verdict(tmp_path):
     # M-02 was caught by two seeds, M-03 by exactly one (s3), H-01 by two
     assert result["only_one_run"] == {"M-03": "s3 (seed 3)"}
     assert result["found_by"]["M-01"] == []
+
+
+# --- aborts: out of credits, and a scorer that fell back --------------------------------------
+
+
+def test_a_402_aborts_the_score_with_a_clear_message_and_no_score_file(run_dir, fake_router, capsys):
+    from hound.llm import OutOfCredits
+
+    fake_router.responses = [OutOfCredits("openrouter/z-ai/glm-5.3-flash for role 'scorer': 402")]
+    assert _run(run_dir) == 2  # distinct exit code, not the generic failure 1
+    out = capsys.readouterr().out
+    assert "OUT OF CREDITS — run aborted" in out
+    assert not (run_dir[0] / "score.json").exists()
+
+
+def test_a_402_is_never_retried_as_if_it_were_a_rate_limit(run_dir, fake_router):
+    from hound.llm import OutOfCredits
+
+    fake_router.responses = [OutOfCredits("402"), _scores([("EXACT", "F001", "w")])]
+    assert _run(run_dir) == 2
+    assert fake_router.calls == 1  # a 429 would have retried; 402 must not
+
+
+def test_a_score_graded_by_the_fallback_model_is_refused(run_dir, fake_router, capsys):
+    fake_router.answered_by = "glm-4.7-flash"  # fell back off the configured paid scorer
+    fake_router.responses = [_scores([("EXACT", "F001", "matches F001")])]
+
+    assert _run(run_dir) == 2
+    out = capsys.readouterr().out
+    assert "SCORE ABORTED" in out
+    assert "not the configured 'z-ai/glm-5.3-flash'" in out
+    assert not (run_dir[0] / "score.json").exists()  # no number rather than a misattributed one
+
+
+def test_a_score_on_the_configured_model_is_written_normally(run_dir, fake_router):
+    fake_router.responses = [_scores([("EXACT", "F001", "matches F001")])]
+    assert _run(run_dir) == 0
+    assert (run_dir[0] / "score.json").exists()

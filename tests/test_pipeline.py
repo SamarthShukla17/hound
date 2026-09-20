@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from hound.codebase import check_provenance, file_sha256, load
-from hound.pipeline import _cited_salt, citation_gate, rejudge, scan
+from hound.pipeline import _cited_salt, citation_gate, rejudge, scan, verify_disproofs
 from hound.runs import CITATION_GATE, STALE_CITATION
 from hound.schema import Verdict
 from tests.mock_server import FIXTURE_LOCATION, MockServer
@@ -331,7 +331,8 @@ def _kill_everything(monkeypatch):
     import hound.pipeline as pipeline
 
     async def judge_that_kills(router, kb, role, cand, code, **kw):
-        return Verdict(verdict="kill", reason="a guard at line 5 prevents this", killed_by="Vault.sol:5")
+        return Verdict(verdict="kill", reason="a guard at line 5 prevents this", killed_by="require at line 5",
+                       disproof_location="src/Vault.sol:5")
 
     monkeypatch.setattr(pipeline, "judge", judge_that_kills)
 
@@ -377,7 +378,7 @@ def test_advisory_report_orders_by_votes_then_severity(tmp_path):
         {"id": "F003", "title": "many votes high", "severity": "high", "votes": 3, "lenses": ["A1", "P1", "P3"],
          "location": "x.sol:1", "root_cause": "", "impact": "", "exploit_steps": []},
     ]
-    verdicts = {c["id"]: Verdict(verdict="kill", reason="r") for c in cands}
+    verdicts = {c["id"]: Verdict(verdict="kill", reason="r", disproof_location="x.sol:1") for c in cands}
     report = _render_report("t", cands, verdicts, files, "advisory", frozenset())
     table_ids = [line.split("|")[1].strip() for line in report.splitlines() if line.startswith("| F")]
     assert table_ids == ["F003", "F002", "F001"]
@@ -506,3 +507,55 @@ def test_rejudge_refuses_a_run_that_predates_provenance(tmp_path, capsys):
     args = _rejudge_args(legacy, tmp_path, None)
     assert asyncio.run(rejudge(args)) == 1
     assert "predates provenance" in capsys.readouterr().out
+
+
+# --- a kill must cite a disproof that actually resolves ---------------------------------------
+
+
+def _verdicts(**kw):
+    return {k: v for k, v in kw.items()}
+
+
+def test_a_kill_citing_a_real_guard_stands(tmp_path):
+    (tmp_path / "Vault.sol").write_text(FIXTURE_VAULT_SOL)
+    files = load(tmp_path)[0]
+    v = {"F001": Verdict(verdict="kill", reason="guarded", killed_by="require",
+                         disproof_location="Vault.sol:12")}
+    assert verify_disproofs(v, files) == 0
+    assert v["F001"].verdict == "kill"
+
+
+def test_a_kill_citing_a_nonexistent_file_is_downgraded_to_needs_poc(tmp_path):
+    (tmp_path / "Vault.sol").write_text(FIXTURE_VAULT_SOL)
+    files = load(tmp_path)[0]
+    v = {"F001": Verdict(verdict="kill", reason="a guard prevents this", killed_by="onlyOwner",
+                         disproof_location="NoSuchFile.sol:5")}
+    assert verify_disproofs(v, files) == 1
+    assert v["F001"].verdict == "needs_poc"
+    assert "KILL NOT ACCEPTED" in v["F001"].reason
+    assert "NoSuchFile.sol:5" in v["F001"].reason
+
+
+def test_a_kill_citing_an_out_of_range_line_is_downgraded(tmp_path):
+    (tmp_path / "Vault.sol").write_text(FIXTURE_VAULT_SOL)
+    files = load(tmp_path)[0]
+    v = {"F001": Verdict(verdict="kill", reason="guarded", killed_by="g", disproof_location="Vault.sol:99999")}
+    assert verify_disproofs(v, files) == 1
+    assert v["F001"].verdict == "needs_poc"
+
+
+def test_deterministic_gate_kills_are_never_downgraded(tmp_path):
+    (tmp_path / "Vault.sol").write_text(FIXTURE_VAULT_SOL)
+    files = load(tmp_path)[0]
+    v = {
+        "F001": Verdict(verdict="kill", reason="does not resolve", killed_by=CITATION_GATE),
+        "F002": Verdict(verdict="kill", reason="file changed", killed_by=STALE_CITATION),
+    }
+    assert verify_disproofs(v, files) == 0
+    assert all(x.verdict == "kill" for x in v.values())
+
+
+def test_keeps_and_needs_poc_are_untouched(tmp_path):
+    files = load(tmp_path)[0]
+    v = {"F001": Verdict(verdict="keep", reason="r"), "F002": Verdict(verdict="needs_poc", reason="r")}
+    assert verify_disproofs(v, files) == 0

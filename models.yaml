@@ -1,8 +1,9 @@
-# MOSTLY FREE. mapper/hunter/poc run on free models (glm-4.7-flash, then openrouter/free).
+# MOSTLY FREE. mapper/hunter/poc run on free models (zai glm-4.7-flash, then the pinned
+# cohere/north-mini-code:free).
 # judge and scorer run on ONE paid model — openrouter z-ai/glm-5.3-flash (~$0.05/$0.17 per M
 # tokens; OpenRouter credit, a few dollars covers many scans) — with free zai glm-4.7-flash as
-# fallback. openrouter/free is NEVER used for judge or scorer: it routes to a random model
-# (once a safety classifier), and a judge/scorer must be a fixed, capable model. The other paid
+# fallback. No random model router is used anywhere: every model is pinned by name, so runs
+# with the same seed are replicates. A judge/scorer must be a fixed, capable model. The other paid
 # targets (gpt-5.6-luna, grok-4.6) stay commented out below. Rate limits are the main
 # constraint on the free roles: Z.ai free is ~1 req/sec with a daily cap and 429s under load;
 # OpenRouter free is ~20 req/min with a low daily cap.
@@ -60,7 +61,7 @@ providers:
     concurrency: 2
     timeout: 120
 
-# Completion-token budget per role. Reasoning models (glm-4.7-flash, openrouter/free) burn
+# Completion-token budget per role. Reasoning models (glm-4.7-flash, glm-5.3-flash) burn
 # this on hidden thinking before emitting any content, so it is large; an empty reply with
 # usage at the cap logs "TRUNCATED BY max_tokens" naming the role to raise. These are also
 # the code defaults (llm.DEFAULT_MAX_TOKENS); a target may override with its own max_tokens.
@@ -78,15 +79,20 @@ max_tokens:
 #   zai:        extra_body.thinking.type=disabled             (confirmed working 2026-09-20: a one-word ping
 #                                                              dropped from 166 completion tokens to 2)
 roles:
-  # openrouter/free routes to a random free model — it can even be a safety classifier — so
-  # it is only ever a last-resort fallback, never a judge.
+  # FREE HUNT-SIDE MODELS ARE PINNED BY NAME. "openrouter/free" was removed on 2026-09-20: it
+  # routes to a RANDOM free model, so seeds are not replicates (one bench seed hunted 10 of 15
+  # calls on unknown models, another 12 of 14 on zai — the runs were not comparable).
+  # cohere/north-mini-code:free chosen from the 21 :free ids listed that day: code-specialised,
+  # 256k context, answered 3/3 with gate-passable path:line citations, ~2s with reasoning off.
+  # Rejected: qwen/qwen3.8-27b:free and z-ai/glm-5.2:free (both 429 rate-limited upstream when
+  # probed), nvidia/nemotron-3-nano-omni-...:free (works, 3-13s, slower).
   mapper:
     - {provider: zai, model: glm-4.7-flash, extra: {extra_body: {thinking: {type: disabled}}}}
-    - {provider: openrouter, model: openrouter/free, extra: {extra_body: {reasoning: {enabled: false}}}}
+    - {provider: openrouter, model: cohere/north-mini-code:free, extra: {extra_body: {reasoning: {enabled: false}}}}
 
   hunter:
     - {provider: zai, model: glm-4.7-flash, extra: {extra_body: {thinking: {type: disabled}}}}
-    - {provider: openrouter, model: openrouter/free, extra: {extra_body: {reasoning: {enabled: false}}}}
+    - {provider: openrouter, model: cohere/north-mini-code:free, extra: {extra_body: {reasoning: {enabled: false}}}}
 
   # Temperature is already 0 for judge calls (see agents.judge). PAID primary, free fallback.
   # z-ai/glm-5.3-flash has MANDATORY reasoning (a reasoning-off extra 400s: "Reasoning is
@@ -105,6 +111,7 @@ roles:
 
   poc:
     - {provider: zai, model: glm-4.7-flash, extra: {extra_body: {thinking: {type: disabled}}}}
+    - {provider: openrouter, model: cohere/north-mini-code:free, extra: {extra_body: {reasoning: {enabled: false}}}}
 
   scorer:
     - {provider: openrouter, model: z-ai/glm-5.3-flash}
@@ -112,7 +119,7 @@ roles:
 
 # $ per million tokens: [input, output]. Approximate — verify before trusting cost reports.
 prices:
-  openrouter/free: [0, 0]
+  cohere/north-mini-code:free: [0, 0]
   glm-4.7-flash: [0, 0]
   z-ai/glm-5.3-flash: [0.05, 0.17]
   # PAID, re-enable with the targets above:

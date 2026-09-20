@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from hound.llm import Provider, Router, cache_key, extract_json, parse_cache_any_model
+from hound.llm import OutOfCredits, Provider, Router, cache_key, extract_json, parse_cache_any_model
 
 FIXTURE_MODELS_YAML = textwrap.dedent(
     """
@@ -431,3 +431,60 @@ def test_parse_cache_any_model():
     assert parse_cache_any_model(None) == {"mapper", "hunter", "poc"}
     assert parse_cache_any_model("none") == frozenset() == parse_cache_any_model("")
     assert parse_cache_any_model("hunter, judge") == {"hunter", "judge"}
+
+
+# --- 402: hard abort, never a graceful fallback -----------------------------------------------
+
+
+def test_a_402_raises_out_of_credits_instead_of_falling_back_to_the_next_target(models_yaml, monkeypatch):
+    """The fallback chain exists so a scan survives a flaky provider. It must NOT quietly swap a
+    paid model for a free one because the account can't pay — that produces a run whose numbers
+    are not what they claim."""
+    router = Router(models_path=str(models_yaml))
+    tried = []
+
+    async def fake_complete(self, *, model, messages, temperature, max_tokens, extra=None):
+        tried.append(model)
+        raise FakeAPIError(402, "This request requires more credits, or fewer max_tokens")
+
+    monkeypatch.setattr(Provider, "complete", fake_complete)
+    with pytest.raises(OutOfCredits) as excinfo:
+        asyncio.run(router.chat("test_role", "s", "u"))
+
+    assert tried == ["enabled-model"]  # stopped dead: no retry, no second target
+    assert "402" in str(excinfo.value) or "credits" in str(excinfo.value)
+
+
+def test_a_402_is_not_retried_with_backoff_like_a_429(models_yaml, monkeypatch, capsys):
+    router = Router(models_path=str(models_yaml))
+    calls = {"n": 0}
+
+    async def fake_complete(self, *, model, messages, temperature, max_tokens, extra=None):
+        calls["n"] += 1
+        raise FakeAPIError(402, "insufficient credits")
+
+    monkeypatch.setattr(Provider, "complete", fake_complete)
+    with pytest.raises(OutOfCredits):
+        asyncio.run(router.chat("test_role", "s", "u"))
+    assert calls["n"] == 1
+    assert "BACKOFF" not in capsys.readouterr().out
+
+
+def test_other_payment_ish_errors_still_use_the_normal_fallback(models_yaml, monkeypatch):
+    """Only 402 aborts; a 429 must still fall through the chain as before."""
+    router = Router(models_path=str(models_yaml))
+    calls = {"n": 0}
+
+    async def fake_complete(self, *, model, messages, temperature, max_tokens, extra=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise FakeAPIError(429, "rate limited")
+        return _resp("recovered", 5)
+
+    async def no_sleep(_seconds):
+        return None
+
+    monkeypatch.setattr(Provider, "complete", fake_complete)
+    monkeypatch.setattr("hound.llm.asyncio.sleep", no_sleep)
+    assert asyncio.run(router.chat("test_role", "s", "u")) == "recovered"
+    assert calls["n"] == 2  # retried, unlike a 402

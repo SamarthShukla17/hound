@@ -21,6 +21,17 @@ _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 _FENCE_RE = re.compile(r"```(?:json)?", re.IGNORECASE)
 
 TERMINAL_STATUS_CODES = {400, 401, 403, 404}
+OUT_OF_CREDITS_STATUS = 402
+
+
+class OutOfCredits(Exception):
+    """HTTP 402 from a provider: the account cannot pay for the call.
+
+    Deliberately NOT a graceful degradation. Every other failure falls back to the next
+    target so a scan survives; falling back here silently swaps the paid judge/scorer for a
+    free model mid-run and produces a run whose numbers are not what they claim to be. This
+    propagates through the agents' catch-alls and aborts the whole chain.
+    """
 
 # Reasoning models burn the completion budget on hidden thinking before emitting any
 # content, so these are large. Override per role via models.yaml's top-level `max_tokens:`
@@ -277,6 +288,11 @@ class Router:
                 status = getattr(exc, "status_code", None)
                 message = str(exc)
                 last_error = exc
+
+                if status == OUT_OF_CREDITS_STATUS:
+                    raise OutOfCredits(
+                        f"{provider.name}/{model} for role {role!r}: {message[:200]}"
+                    ) from exc
 
                 # Reasoning models (e.g. gpt-5.6-luna) can reject a custom temperature.
                 if (

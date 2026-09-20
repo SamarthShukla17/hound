@@ -15,7 +15,7 @@ from pathlib import Path
 from .agents import hunter, judge, mapper, poc
 from .codebase import build_provenance, check_provenance, chunk, load, rel_path
 from .knowledge import load_kb, poc_refs, select
-from .llm import Router, parse_cache_any_model
+from .llm import OutOfCredits, Router, parse_cache_any_model
 from .runs import CITATION_GATE, STALE_CITATION, is_hard_kill, read_findings, write_findings
 from .scope import DEFAULT_PROFILE, resolve_scope
 from .schema import SEV_RANK, Verdict
@@ -106,12 +106,37 @@ def citation_gate(cands: list, current_files: list):
     return queue, hard
 
 
+def verify_disproofs(verdicts: dict, files: list) -> int:
+    """Put every judge kill's disproof citation through the same gate the findings face.
+
+    A kill deletes evidence, so it must point at real code. If the cited guard does not
+    resolve to an in-range line, the kill is downgraded to needs_poc — the candidate goes to
+    the human instead of being removed on an unverifiable claim. Deterministic gate kills are
+    exempt: their disproof IS that the citation does not resolve. Returns how many were
+    downgraded.
+    """
+    downgraded = 0
+    for fid, v in list(verdicts.items()):
+        if v.verdict != "kill" or v.killed_by in (CITATION_GATE, STALE_CITATION):
+            continue
+        if spans(v.disproof_location, files):
+            continue
+        verdicts[fid] = Verdict(
+            verdict="needs_poc",
+            reason=f"{v.reason} || KILL NOT ACCEPTED: disproof citation "
+                   f"{v.disproof_location!r} does not resolve to a real in-range line",
+            severity=v.severity,
+        )
+        downgraded += 1
+    return downgraded
+
+
 def _cited_provenance(full: dict, deduped: list) -> dict:
     cited = {rel for c in deduped for rel in (c.get("cited") or {})}
     return {**full, "files": {rel: meta for rel, meta in full["files"].items() if rel in cited}}
 
 
-async def run_judges(router, kb, queue, contexts, *, map_text, known, killed, notes, scope, no_judge2) -> dict:
+async def run_judges(router, kb, queue, contexts, *, map_text, known, killed, notes, scope, no_judge2, files=()) -> dict:
     """The judge stage: judge every queued candidate, then judge2 (if configured) on the keeps.
 
     Shared by scan and rejudge so a re-judge is exactly the judge stage of a scan, nothing
@@ -126,6 +151,10 @@ async def run_judges(router, kb, queue, contexts, *, map_text, known, killed, no
 
     results = await asyncio.gather(*(call("judge", c) for c in queue))
     verdicts = {c["id"]: v for c, v in zip(queue, results)}
+
+    unciteable = verify_disproofs(verdicts, files)
+    if unciteable:
+        print(f"{unciteable} judge kill(s) downgraded to needs_poc: disproof citation did not resolve")
 
     keeps = [c for c in queue if verdicts[c["id"]].verdict == "keep"]
     if not no_judge2 and not router.has("judge2") and keeps:
@@ -151,7 +180,26 @@ def judge_queue(queue: list, max_judge: int):
     return queue, {c["id"]: Verdict(verdict="needs_poc", reason="not judged (over --max-judge)") for c in overflow}
 
 
+ABORT_MESSAGE = "OUT OF CREDITS — run aborted"
+
+
 async def scan(args) -> int:
+    try:
+        return await _scan(args)
+    except OutOfCredits as exc:
+        print(f"{ABORT_MESSAGE}: {exc}")
+        return 2
+
+
+async def rejudge(args) -> int:
+    try:
+        return await _rejudge(args)
+    except OutOfCredits as exc:
+        print(f"{ABORT_MESSAGE}: {exc}")
+        return 2
+
+
+async def _scan(args) -> int:
     kb = load_kb(args.kb)
     scope_globs = _read_scope_globs(args.scope)
     known_text = _read_text_or_empty(args.known)
@@ -256,7 +304,7 @@ async def scan(args) -> int:
     verdicts.update(
         await run_judges(
             router, kb, queue, contexts, map_text=map_text, known=known_text, killed=killed_text,
-            notes=notes_text, scope=scope, no_judge2=args.no_judge2,
+            notes=notes_text, scope=scope, no_judge2=args.no_judge2, files=files,
         )
     )
 
@@ -417,7 +465,7 @@ def _verdict_counts(candidates: list, verdicts: dict, hard_ids) -> dict:
     }
 
 
-async def rejudge(args) -> int:
+async def _rejudge(args) -> int:
     """Re-run ONLY the judge stage on a finished run and write a new run dir.
 
     Hunting is the expensive, free-tier-rate-limited half; judge prompts and scope rules are
@@ -481,7 +529,7 @@ async def rejudge(args) -> int:
     verdicts.update(
         await run_judges(
             router, kb, queue, contexts, map_text=map_text, known=known_text, killed="",
-            notes=notes_text, scope=scope, no_judge2=args.no_judge2,
+            notes=notes_text, scope=scope, no_judge2=args.no_judge2, files=files,
         )
     )
 

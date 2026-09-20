@@ -32,14 +32,16 @@ def test_only_the_intended_paid_model_is_active():
     config = load_models_config()
     active_models = {t["model"] for targets in config["roles"].values() for t in targets}
     # gpt-5.6-luna and grok-4.6 stay commented out; z-ai/glm-5.3-flash is the one paid model.
-    assert active_models <= {"glm-4.7-flash", "openrouter/free", "z-ai/glm-5.3-flash"}
+    assert active_models <= {"glm-4.7-flash", "cohere/north-mini-code:free", "z-ai/glm-5.3-flash"}
 
 
-def test_judge_and_scorer_never_use_the_random_free_router():
+def test_no_role_uses_a_random_model_router():
+    """A random-router id (openrouter/free) picks a different model per call, so two runs with
+    the same seed are not replicates. Every model must be pinned by name."""
     config = load_models_config()
-    for role in ("judge", "judge2", "scorer"):
-        models = [t["model"] for t in config["roles"][role]]
-        assert "openrouter/free" not in models, role
+    for role, targets in config["roles"].items():
+        for t in targets:
+            assert t["model"] != "openrouter/free", f"{role} uses the random free router"
 
 
 def test_judge_and_scorer_are_glm_5_3_flash_then_zai_fallback():

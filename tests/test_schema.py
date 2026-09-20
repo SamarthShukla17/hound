@@ -64,6 +64,25 @@ def test_verdict_severity_is_optional():
     assert v.severity is None
 
 
+def test_a_judge_kill_must_cite_where_the_disproof_lives():
+    with pytest.raises(ValidationError, match="disproof_location"):
+        Verdict(verdict="kill", reason="a guard prevents this", killed_by="onlyOwner")
+    ok = Verdict(verdict="kill", reason="a guard prevents this", killed_by="onlyOwner",
+                 disproof_location="Vault.sol:88")
+    assert ok.disproof_location == "Vault.sol:88"
+
+
+@pytest.mark.parametrize("marker", ["citation gate", "stale citation (file changed since hunt)"])
+def test_deterministic_gate_kills_are_exempt_because_they_are_self_justifying(marker):
+    v = Verdict(verdict="kill", reason="does not resolve", killed_by=marker)
+    assert v.verdict == "kill" and v.disproof_location == ""
+
+
+def test_keep_and_needs_poc_never_need_a_disproof_location():
+    assert Verdict(verdict="keep", reason="r").disproof_location == ""
+    assert Verdict(verdict="needs_poc", reason="r").disproof_location == ""
+
+
 def test_sev_rank_orders_critical_first():
     assert SEV_RANK["critical"] < SEV_RANK["high"] < SEV_RANK["medium"] < SEV_RANK["low"]
 

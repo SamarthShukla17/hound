@@ -223,7 +223,8 @@ def test_judge_accepts_severity_null_string_and_null_killed_by_without_a_repair_
 
 
 def test_judge_missing_verdict_triggers_exactly_one_repair_call_and_uses_it(kb):
-    good = {"verdict": "kill", "reason": "guarded by onlyOwner at line 5", "severity": None, "killed_by": "onlyOwner"}
+    good = {"verdict": "kill", "reason": "guarded by onlyOwner at line 5", "severity": None,
+            "killed_by": "onlyOwner", "disproof_location": "Vault.sol:5"}
     r = FakeRouter(chat_json_results=[MISSING_VERDICT, good])
     result = asyncio.run(judge(r, kb, "judge", CAND, CODE))
     assert result.verdict == "kill"
@@ -248,7 +249,8 @@ def test_judge_call_that_raises_is_not_repaired_it_is_needs_poc(kb):
 
 
 def test_judge_forwards_the_cache_salt_including_on_the_repair_call(kb):
-    good = {"verdict": "kill", "reason": "guarded", "severity": None, "killed_by": "x"}
+    good = {"verdict": "kill", "reason": "guarded", "severity": None, "killed_by": "x",
+            "disproof_location": "Vault.sol:5"}
     r = FakeRouter(chat_json_results=[MISSING_VERDICT, good])
     asyncio.run(judge(r, kb, "judge", CAND, CODE, cache_salt="abc123"))
     assert [c["salt"] for c in r.calls] == ["abc123", "abc123"]
@@ -258,3 +260,40 @@ def test_no_salt_is_sent_when_none_is_given(kb):
     r = FakeRouter(chat_json_result={"verdict": "kill", "reason": "x"})
     asyncio.run(judge(r, kb, "judge", CAND, CODE))
     assert r.calls[0]["salt"] == ""
+
+
+# --- 402 propagates through every agent's graceful catch-all ----------------------------------
+
+
+class CreditlessRouter:
+    async def chat_json(self, role, system, user, **kw):
+        from hound.llm import OutOfCredits
+
+        raise OutOfCredits("openrouter/z-ai/glm-5.3-flash for role 'judge': 402")
+
+    chat = chat_json
+
+
+@pytest.mark.parametrize("agent_call", [
+    lambda kb: mapper(CreditlessRouter(), kb, "  1| x"),
+    lambda kb: hunter(CreditlessRouter(), kb, kb.lenses[0], "  1| x"),
+    lambda kb: judge(CreditlessRouter(), kb, "judge", {"title": "t", "location": "a.sol:1"}, "  1| x"),
+    lambda kb: poc(CreditlessRouter(), kb, {"title": "t"}, "  1| x"),
+], ids=["mapper", "hunter", "judge", "poc"])
+def test_out_of_credits_is_not_swallowed_by_graceful_degradation(kb, agent_call):
+    """Every agent degrades gracefully on a model failure — except this one. A judge that
+    returns needs_poc on 402 turns an unpayable run into 23 fake 'needs_poc' verdicts."""
+    from hound.llm import OutOfCredits
+
+    with pytest.raises(OutOfCredits):
+        asyncio.run(agent_call(kb))
+
+
+def test_a_kill_without_a_disproof_citation_gets_one_repair_then_becomes_needs_poc(kb):
+    """A model that kills a finding but can't say where the disproof lives must not delete
+    evidence on that basis."""
+    uncited_kill = {"verdict": "kill", "reason": "there is surely a guard somewhere", "killed_by": "a guard"}
+    r = FakeRouter(chat_json_results=[uncited_kill, uncited_kill])
+    result = asyncio.run(judge(r, kb, "judge", CAND, CODE))
+    assert result.verdict == "needs_poc"
+    assert len(r.calls) == 2  # one repair, not a loop

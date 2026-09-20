@@ -11,6 +11,7 @@ import json
 
 from pydantic import ValidationError
 
+from .llm import OutOfCredits
 from .schema import Finding, Verdict
 from .scope import as_scope
 
@@ -77,6 +78,8 @@ async def mapper(r, kb, code: str, notes: str = "", scope=None) -> dict:
 
     try:
         data = await r.chat_json("mapper", sys_prompt, user, temperature=0.1)
+    except OutOfCredits:
+        raise  # never degrade gracefully past an unpayable call
     except Exception as exc:  # noqa: BLE001 - a scan continues without a map, just less well
         print(f"[agents] mapper failed: {exc}")
         return {}
@@ -120,6 +123,8 @@ async def hunter(
 
     try:
         data = await r.chat_json("hunter", sys_prompt, user, temperature=temp, **_salt(cache_salt))
+    except OutOfCredits:
+        raise  # never degrade gracefully past an unpayable call
     except Exception as exc:  # noqa: BLE001
         print(f"[agents] hunter ({lens.id}) failed: {exc}")
         return []
@@ -168,6 +173,9 @@ async def judge(
         "restriction, a rounding direction that already protects the protocol, an unreachable "
         "state, a known/acknowledged issue, an exclusion the SCOPE RULES above actually make, or a match against a listed "
         "killed false positive.\n"
+        "If you kill it, you MUST cite where the disproof lives in disproof_location, as "
+        "path:line or path:start-end (the modifier, require, or guard that defeats the exploit). "
+        "A kill you cannot cite is not a kill — use needs_poc instead.\n"
         "3. Only if no disproof survives, the reasoning is coherent end to end, and the finding is "
         "in scope under the SCOPE RULES above: verdict = keep. Apply those rules exactly as written; "
         "do not add exclusions of your own.\n\n"
@@ -175,12 +183,15 @@ async def judge(
         "actual token behavior, on-chain parameters): verdict = needs_poc. That is a real third "
         "answer, not a hedge — it routes the candidate to a human instead of silently killing it.\n\n"
         'Return ONLY this JSON shape: {"verdict": "keep|kill|needs_poc", "reason": "...", '
-        '"severity": "critical|high|medium|low or null", "killed_by": "..."}'
+        '"severity": "critical|high|medium|low or null", "killed_by": "...", '
+        '"disproof_location": "path:line (REQUIRED when verdict is kill, else empty)"}'
     )
     user = _user_prompt(code, map_block, notes_block, known_block, killed_block, cand_block, task)
 
     try:
         data = await r.chat_json(role, sys_prompt, user, temperature=0.0, **_salt(cache_salt))
+    except OutOfCredits:
+        raise  # never degrade gracefully past an unpayable call
     except Exception as exc:  # noqa: BLE001 - never kill a candidate because the judge call failed
         print(f"[agents] judge ({role}) failed: {exc}")
         return Verdict(verdict="needs_poc", reason=str(exc))
@@ -197,12 +208,15 @@ async def judge(
         "REPAIR: your previous reply was not a valid verdict:\n"
         + json.dumps(data, sort_keys=True, default=str)[:2000]
         + '\nReply again with ONLY {"verdict": "keep|kill|needs_poc", "reason": "...", '
-        '"severity": "critical|high|medium|low or null", "killed_by": "..."}. '
-        '"verdict" and "reason" are required.',
+        '"severity": "critical|high|medium|low or null", "killed_by": "...", '
+        '"disproof_location": "path:line"}. "verdict" and "reason" are required, and a "kill" '
+        'also requires "disproof_location" citing the guard that disproves the finding.',
     )
     try:
         repaired = await r.chat_json(role, sys_prompt, repair_user, temperature=0.0, **_salt(cache_salt))
         return Verdict(**repaired)
+    except OutOfCredits:
+        raise  # never degrade gracefully past an unpayable call
     except Exception as exc:  # noqa: BLE001
         print(f"[agents] judge ({role}) repair failed: {exc}")
         return Verdict(verdict="needs_poc", reason=f"judge reply unusable after one repair: {exc}")
@@ -233,6 +247,8 @@ async def poc(r, kb, cand: dict, code: str, framework: str = "foundry", refs: st
 
     try:
         return await r.chat("poc", sys_prompt, user, temperature=0.2)
+    except OutOfCredits:
+        raise  # never degrade gracefully past an unpayable call
     except Exception as exc:  # noqa: BLE001
         print(f"[agents] poc failed: {exc}")
         return f"// PoC generation failed: {exc}\n// This is a stub, not a test.\n"

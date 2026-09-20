@@ -7,7 +7,7 @@ from collections import Counter
 from pathlib import Path
 
 from .codebase import check_provenance
-from .llm import Router
+from .llm import OutOfCredits, Router
 from .runs import is_hard_kill, read_findings
 
 RETRY_DELAY_SECONDS = 30
@@ -105,11 +105,33 @@ def _sanitize(scores: list, known_ids: set) -> list:
     return warnings
 
 
+def intended_scorer_model(router) -> str:
+    targets = router.roles.get("scorer") or []
+    return targets[0]["model"] if targets else ""
+
+
+def scorer_fallback_error(router) -> str:
+    """"" if the scorer ran on its configured primary model, else why to abort.
+
+    A score graded by a fallback model is not a result: the free fallback has already been
+    observed degenerating (comparing all 23 bugs against one finding). Better no number than
+    a number from a different grader than the one named.
+    """
+    intended = intended_scorer_model(router)
+    used = {c["model"] for c in router.call_log if c["role"] == "scorer"}
+    strayed = used - {intended}
+    if strayed:
+        return f"scored by {', '.join(sorted(strayed))}, not the configured {intended!r}"
+    return ""
+
+
 async def _call_scorer(router, user_prompt: str):
     """One scorer call, retried ONCE after a pause if it fails on a 429."""
     for attempt in (1, 2):
         try:
             return await router.chat_json("scorer", SYSTEM_PROMPT, user_prompt, temperature=0.0)
+        except OutOfCredits:
+            raise
         except Exception as exc:  # noqa: BLE001
             if attempt == 1 and "429" in str(exc):
                 print(f"scorer rate-limited (429); retrying once in {RETRY_DELAY_SECONDS}s")
@@ -180,9 +202,18 @@ async def score(args) -> int:
     try:
         router = Router(models_path=args.models, local_only=args.local_only)
         data = await _call_scorer(router, user_prompt)
+    except OutOfCredits as exc:
+        print(f"OUT OF CREDITS — run aborted: {exc}")
+        return 2
     except Exception as exc:  # noqa: BLE001 - a scorer failure is a clean exit, not a traceback
         print(f"score failed: {str(exc)[:300]}")
         return 1
+
+    strayed = scorer_fallback_error(router)
+    if strayed:
+        print(f"SCORE ABORTED: {strayed}. A run graded by a fallback scorer is not a result; "
+              f"no score.json written.")
+        return 2
 
     scores = data.get("scores", []) if isinstance(data, dict) else []
     off_catalog = data.get("off_catalog", []) if isinstance(data, dict) else []
