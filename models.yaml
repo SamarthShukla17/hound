@@ -93,11 +93,16 @@ roles:
   # provider failure instead yields an EMPTY lens, which the scan logs loudly — a recall hole
   # that is visible beats a silent model swap. zai glm-4.7-flash was demoted after it timed out
   # on a real bench lens (147s, 0 findings) while 429-storming.
+  # PINNED-GLM-HUNTER (2026-09-20). cohere/north-mini-code:free was measured as the sole
+  # hunter across 3 seeds and collapsed: 4, 7 and 0 raw candidates (one seed produced NOTHING
+  # from all 14 lenses, no errors), 2.2% union recall vs the ~22% baseline. glm-4.7-flash
+  # previously produced 34-46 raw. It 429s and is slow, but a lens that fails loudly is
+  # recoverable and a model that finds nothing is not.
   mapper:
-    - {provider: openrouter, model: cohere/north-mini-code:free, extra: {extra_body: {reasoning: {enabled: false}}}}
+    - {provider: zai, model: glm-4.7-flash, extra: {extra_body: {thinking: {type: disabled}}}}
 
   hunter:
-    - {provider: openrouter, model: cohere/north-mini-code:free, extra: {extra_body: {reasoning: {enabled: false}}}}
+    - {provider: zai, model: glm-4.7-flash, extra: {extra_body: {thinking: {type: disabled}}}}
 
   # Temperature is already 0 for judge calls (see agents.judge). PAID primary, free fallback.
   # z-ai/glm-5.3-flash has MANDATORY reasoning (a reasoning-off extra 400s: "Reasoning is
