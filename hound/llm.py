@@ -233,7 +233,12 @@ class Router:
                     break
 
                 if attempt < 2:
-                    await asyncio.sleep(min(60, 4 * 2**attempt))
+                    delay = min(60, 4 * 2**attempt)
+                    print(
+                        f"[llm] BACKOFF {provider.name}/{model}: status={status} "
+                        f"retry {attempt + 1}/2 in {delay}s"
+                    )
+                    await asyncio.sleep(delay)
                     continue
                 break
             else:
@@ -387,7 +392,9 @@ async def check(args) -> int:
                     {"role": "user", "content": "Say: ready"},
                 ],
                 temperature=0.0,
-                max_tokens=10,
+                # Reasoning models (glm-4.7-flash, openrouter/free) spend ~150 tokens
+                # thinking before a one-word answer; 10 returns an empty reply.
+                max_tokens=512,
                 extra=target.get("extra"),
             )
             reply = strip_think(response.choices[0].message.content or "")
