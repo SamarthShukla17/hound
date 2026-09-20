@@ -86,12 +86,17 @@ roles:
   # 256k context, answered 3/3 with gate-passable path:line citations, ~2s with reasoning off.
   # Rejected: qwen/qwen3.8-27b:free and z-ai/glm-5.2:free (both 429 rate-limited upstream when
   # probed), nvidia/nemotron-3-nano-omni-...:free (works, 3-13s, slower).
+  # SINGLE TARGET, NO FALLBACK, on purpose. The map feeds every hunter prompt and the hunters
+  # produce the candidates recall is measured on, so a mid-run fallback would silently mix
+  # models and make seeds non-replicates (measured 2026-09-20: one seed hunted 10/15 calls on
+  # unknown models, another 12/14 on zai; the two runs were not comparable). With no fallback a
+  # provider failure instead yields an EMPTY lens, which the scan logs loudly — a recall hole
+  # that is visible beats a silent model swap. zai glm-4.7-flash was demoted after it timed out
+  # on a real bench lens (147s, 0 findings) while 429-storming.
   mapper:
-    - {provider: zai, model: glm-4.7-flash, extra: {extra_body: {thinking: {type: disabled}}}}
     - {provider: openrouter, model: cohere/north-mini-code:free, extra: {extra_body: {reasoning: {enabled: false}}}}
 
   hunter:
-    - {provider: zai, model: glm-4.7-flash, extra: {extra_body: {thinking: {type: disabled}}}}
     - {provider: openrouter, model: cohere/north-mini-code:free, extra: {extra_body: {reasoning: {enabled: false}}}}
 
   # Temperature is already 0 for judge calls (see agents.judge). PAID primary, free fallback.
@@ -109,9 +114,11 @@ roles:
   judge2: []
     # - {provider: xai, model: grok-4.6}
 
+  # PoC text is not measured by recall, so a fallback is harmless here; the pinned model leads
+  # because zai was 429-storming and lost 6 PoCs to it on 2026-09-20.
   poc:
-    - {provider: zai, model: glm-4.7-flash, extra: {extra_body: {thinking: {type: disabled}}}}
     - {provider: openrouter, model: cohere/north-mini-code:free, extra: {extra_body: {reasoning: {enabled: false}}}}
+    - {provider: zai, model: glm-4.7-flash, extra: {extra_body: {thinking: {type: disabled}}}}
 
   scorer:
     - {provider: openrouter, model: z-ai/glm-5.3-flash}
