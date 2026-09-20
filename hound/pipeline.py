@@ -111,7 +111,7 @@ def _cited_provenance(full: dict, deduped: list) -> dict:
     return {**full, "files": {rel: meta for rel, meta in full["files"].items() if rel in cited}}
 
 
-async def run_judges(router, kb, queue, contexts, *, map_text, known, killed, notes, scope_rules, no_judge2) -> dict:
+async def run_judges(router, kb, queue, contexts, *, map_text, known, killed, notes, scope, no_judge2) -> dict:
     """The judge stage: judge every queued candidate, then judge2 (if configured) on the keeps.
 
     Shared by scan and rejudge so a re-judge is exactly the judge stage of a scan, nothing
@@ -121,7 +121,7 @@ async def run_judges(router, kb, queue, contexts, *, map_text, known, killed, no
     def call(role, c):
         return judge(
             router, kb, role, c, contexts[c["id"]], pmap=map_text, known=known, killed=killed,
-            cache_salt=_cited_salt(c), scope_rules=scope_rules, notes=notes,
+            cache_salt=_cited_salt(c), scope=scope, notes=notes,
         )
 
     results = await asyncio.gather(*(call("judge", c) for c in queue))
@@ -186,7 +186,7 @@ async def scan(args) -> int:
 
     print(f"files: {len(files)}  lines: {total_lines}  chunks: {len(chunks)}  lenses: {len(lenses)}  passes: {args.passes}")
     print(f"planned: {len(chunks)} map calls + {hunter_calls} hunter calls + up to {args.max_judge} judge calls")
-    print(f"scope profile: {scope['name']} ({scope['source']})")
+    print(f"scope profile: {scope.name} ({scope.source})")
     print(f"judge mode: {judge_mode}" + (" (judge annotates; nothing it says removes a candidate)" if judge_mode == "advisory" else " (judge kills are removed from the default scored set)"))
 
     if args.dry_run:
@@ -200,7 +200,7 @@ async def scan(args) -> int:
     )
 
     # --- MAP ---
-    raw_maps = await asyncio.gather(*(mapper(router, kb, c, notes_text, scope_rules=scope["text"]) for c in chunks))
+    raw_maps = await asyncio.gather(*(mapper(router, kb, c, notes_text, scope=scope) for c in chunks))
     merged_map = _merge_maps(raw_maps)
     map_text = _map_text(merged_map, args.map_cap)
 
@@ -221,7 +221,7 @@ async def scan(args) -> int:
         tasks = [
             hunter(
                 router, kb, lens, c, pmap=map_text, known=known_text, killed=killed_text, already=already,
-                temp=temp, scope_rules=scope["text"], notes=notes_text,
+                temp=temp, scope=scope, notes=notes_text,
             )
             for c in chunks
             for lens in lenses
@@ -256,7 +256,7 @@ async def scan(args) -> int:
     verdicts.update(
         await run_judges(
             router, kb, queue, contexts, map_text=map_text, known=known_text, killed=killed_text,
-            notes=notes_text, scope_rules=scope["text"], no_judge2=args.no_judge2,
+            notes=notes_text, scope=scope, no_judge2=args.no_judge2,
         )
     )
 
@@ -274,7 +274,7 @@ async def scan(args) -> int:
     ]
     poc_results = await asyncio.gather(
         *(
-            poc(router, kb, c, ctx, framework=fw, refs=refs_text, scope_rules=scope["text"])
+            poc(router, kb, c, ctx, framework=fw, refs=refs_text, scope=scope)
             for c, ctx, fw in zip(poc_targets, poc_code_ctx, poc_frameworks)
         )
     )
@@ -297,7 +297,7 @@ async def scan(args) -> int:
         findings_out.append(entry)
     write_findings(
         run_dir, judge_mode, _cited_provenance(provenance_all, deduped), findings_out,
-        scope=scope, seed=args.seed, lenses=args.lenses, passes=args.passes, scope_globs=scope_globs,
+        scope=scope.as_dict(), seed=args.seed, lenses=args.lenses, passes=args.passes, scope_globs=scope_globs,
     )
 
     (run_dir / "report.md").write_text(_render_report(args.target, deduped, verdicts, files, judge_mode, hard_ids))
@@ -472,7 +472,7 @@ async def rejudge(args) -> int:
     verdicts.update(overflow_verdicts)
 
     print(f"rejudging {len(queue)} of {len(findings)} candidates from {src_dir} "
-          f"(carried over {len(carried_hard)} gate kills) under scope profile: {scope['name']} ({scope['source']})")
+          f"(carried over {len(carried_hard)} gate kills) under scope profile: {scope.name} ({scope.source})")
     router = Router(
         models_path=args.models, local_only=args.local_only, seed=meta.get("seed", 0), fresh=args.fresh,
         cache_any_model=parse_cache_any_model(getattr(args, "cache_any_model", None)),
@@ -481,7 +481,7 @@ async def rejudge(args) -> int:
     verdicts.update(
         await run_judges(
             router, kb, queue, contexts, map_text=map_text, known=known_text, killed="",
-            notes=notes_text, scope_rules=scope["text"], no_judge2=args.no_judge2,
+            notes=notes_text, scope=scope, no_judge2=args.no_judge2,
         )
     )
 
@@ -496,7 +496,7 @@ async def rejudge(args) -> int:
         entry["hard_kill"] = f["id"] in hard_ids
         out.append(entry)
     write_findings(
-        run_dir, judge_mode, provenance, out, scope=scope, seed=meta.get("seed", 0),
+        run_dir, judge_mode, provenance, out, scope=scope.as_dict(), seed=meta.get("seed", 0),
         lenses=meta.get("lenses"), passes=meta.get("passes"), scope_globs=scope_globs,
         rejudged_from=str(src_dir),
     )

@@ -12,13 +12,7 @@ import json
 from pydantic import ValidationError
 
 from .schema import Finding, Verdict
-from .scope import CONTEST
-
-IMPACT_LADDER = """IMPACT LADDER
-- critical: direct theft, unbacked mint, or permanent freeze reachable by an unprivileged actor.
-- high: fund loss or permanent lock under a reachable condition; a broken core invariant; privilege escalation.
-- medium: bounded value leakage, mis-accounting, or griefing/DoS of a core function.
-Explicitly ignore: style, gas, events, naming. (What counts as in scope for privileged actors is set by the SCOPE RULES below.)"""
+from .scope import as_scope
 
 EVIDENCE_RULES = """EVIDENCE RULES
 - Cite only real numbered lines, as path:line or path:start-end. No citation means no finding.
@@ -33,10 +27,11 @@ ROLE_PROMPT = (
 )
 
 
-def system(kb, scope_rules: str = "") -> str:
-    """Shared system prompt: role, impact ladder, kb.principles verbatim, the run's SCOPE
-    RULES, evidence rules. `scope_rules` defaults to the contest profile."""
-    return "\n\n".join([ROLE_PROMPT, IMPACT_LADDER, kb.principles, scope_rules or CONTEST, EVIDENCE_RULES])
+def system(kb, scope=None) -> str:
+    """Shared system prompt: role, the run's impact ladder, kb.principles verbatim, the run's
+    SCOPE RULES, evidence rules. `scope` is a Scope (or rules text); default is contest."""
+    sc = as_scope(scope)
+    return "\n\n".join([ROLE_PROMPT, sc.ladder, kb.principles, sc.text, EVIDENCE_RULES])
 
 
 def _map_block(pmap) -> str:
@@ -64,8 +59,8 @@ def _user_prompt(*sections: str) -> str:
     return "\n\n".join(s for s in sections if s)
 
 
-async def mapper(r, kb, code: str, notes: str = "", scope_rules: str = "") -> dict:
-    sys_prompt = system(kb, scope_rules)
+async def mapper(r, kb, code: str, notes: str = "", scope=None) -> dict:
+    sys_prompt = system(kb, scope)
     notes_block = f"SCOPE NOTES:\n{notes}" if notes else ""
     task = (
         "TASK: MAP\n"
@@ -76,7 +71,7 @@ async def mapper(r, kb, code: str, notes: str = "", scope_rules: str = "") -> di
         '"invariants": [{"id": "I1", "statement": "...", "threatened_by": ["..."]}]}\n\n'
         "Invariants must be falsifiable sentences (something a concrete test could disprove), "
         "and must always include: value conservation, no unbacked mint, authority integrity, "
-        "and no unprivileged permanent lock — plus anything else specific to this code."
+        f"and {as_scope(scope).lock_invariant} — plus anything else specific to this code."
     )
     user = _user_prompt(code, notes_block, task)
 
@@ -93,9 +88,9 @@ async def mapper(r, kb, code: str, notes: str = "", scope_rules: str = "") -> di
 
 async def hunter(
     r, kb, lens, code: str, pmap=None, known: str = "", killed: str = "", already=None, temp: float = 0.3,
-    cache_salt: str = "", scope_rules: str = "", notes: str = "",
+    cache_salt: str = "", scope=None, notes: str = "",
 ):
-    sys_prompt = system(kb, scope_rules)
+    sys_prompt = system(kb, scope)
 
     map_block = _map_block(pmap)
     notes_block = f"SCOPE NOTES (trusted roles, exclusions):\n{notes}" if notes else ""
@@ -153,9 +148,9 @@ async def hunter(
 
 async def judge(
     r, kb, role: str, cand: dict, code: str, pmap=None, known: str = "", killed: str = "", cache_salt: str = "",
-    scope_rules: str = "", notes: str = "",
+    scope=None, notes: str = "",
 ) -> Verdict:
-    sys_prompt = system(kb, scope_rules)
+    sys_prompt = system(kb, scope)
 
     map_block = _map_block(pmap)
     notes_block = f"SCOPE NOTES (trusted roles, exclusions):\n{notes}" if notes else ""
@@ -213,8 +208,8 @@ async def judge(
         return Verdict(verdict="needs_poc", reason=f"judge reply unusable after one repair: {exc}")
 
 
-async def poc(r, kb, cand: dict, code: str, framework: str = "foundry", refs: str = "", scope_rules: str = "") -> str:
-    sys_prompt = system(kb, scope_rules)
+async def poc(r, kb, cand: dict, code: str, framework: str = "foundry", refs: str = "", scope=None) -> str:
+    sys_prompt = system(kb, scope)
 
     refs_block = f"POC SKELETONS FOR REFERENCE:\n{refs[:6000]}" if refs else ""
     cand_block = "FINDING TO REPRODUCE:\n" + json.dumps(cand, sort_keys=True)

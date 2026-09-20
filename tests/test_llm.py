@@ -1,6 +1,7 @@
 """Step 2: Router/Provider fallback, caching, and JSON extraction — no network."""
 
 import asyncio
+import json
 import textwrap
 from types import SimpleNamespace
 
@@ -331,7 +332,14 @@ def _cache_any_router(tmp_path, monkeypatch, **kw):
     return Router(models_path=str(path), **kw)
 
 
-def test_hunter_reply_cached_under_the_fallback_model_is_replayed_when_the_primary_is_tried_first(tmp_path, monkeypatch):
+def _seed_cache(router, prompt, reply, answered_by, provider="primary"):
+    key = cache_key("*", "s", prompt, 0.3, 0)
+    (router.cache_dir / f"{key}.txt").write_text(reply)
+    if answered_by is not None:
+        (router.cache_dir / f"{key}.meta.json").write_text(json.dumps({"model": answered_by, "provider": provider}))
+
+
+def test_a_reply_from_another_configured_model_is_replayed_across_providers(tmp_path, monkeypatch):
     router = _cache_any_router(tmp_path, monkeypatch)
     calls = []
 
@@ -340,11 +348,57 @@ def test_hunter_reply_cached_under_the_fallback_model_is_replayed_when_the_prima
         return _resp("reply", 5)
 
     monkeypatch.setattr(Provider, "complete", fake_complete)
-    # a previous run's reply was produced by the fallback model...
-    (router.cache_dir / f"{cache_key('*', 's', 'prompt', 0.3, 0)}.txt").write_text("reply from the fallback")
-    # ...and this run tries the primary first, but must still replay it rather than re-sample
+    # a previous run's reply came from the FALLBACK model, which is still a configured target...
+    _seed_cache(router, "prompt", "reply from the fallback", answered_by="fallback-model")
+    # ...and this run tries the primary first, but still replays it rather than re-sampling
     assert asyncio.run(router.chat("hunter", "s", "prompt")) == "reply from the fallback"
     assert calls == []
+
+
+def test_a_reply_from_a_model_no_longer_configured_for_the_role_is_not_replayed(tmp_path, monkeypatch, capsys):
+    router = _cache_any_router(tmp_path, monkeypatch)
+    calls = []
+
+    async def fake_complete(self, *, model, messages, temperature, max_tokens, extra=None):
+        calls.append(model)
+        return _resp("fresh reply", 5)
+
+    monkeypatch.setattr(Provider, "complete", fake_complete)
+    _seed_cache(router, "prompt", "random free-router reply", answered_by="openrouter/free")
+
+    assert asyncio.run(router.chat("hunter", "s", "prompt")) == "fresh reply"
+    assert calls == ["primary-model"]
+    assert "not a configured target for role 'hunter'" in capsys.readouterr().out
+
+    # the stale entry was replaced, and now records who answered
+    key = cache_key("*", "s", "prompt", 0.3, 0)
+    assert (router.cache_dir / f"{key}.txt").read_text() == "fresh reply"
+    assert json.loads((router.cache_dir / f"{key}.meta.json").read_text())["model"] == "primary-model"
+    # and the next call replays the fresh one
+    assert asyncio.run(router.chat("hunter", "s", "prompt")) == "fresh reply" and calls == ["primary-model"]
+
+
+def test_a_model_agnostic_entry_with_no_recorded_model_cannot_be_verified_so_it_is_not_replayed(tmp_path, monkeypatch):
+    router = _cache_any_router(tmp_path, monkeypatch)
+
+    async def fake_complete(self, *, model, messages, temperature, max_tokens, extra=None):
+        return _resp("fresh reply", 5)
+
+    monkeypatch.setattr(Provider, "complete", fake_complete)
+    _seed_cache(router, "prompt", "unverifiable", answered_by=None)
+    assert asyncio.run(router.chat("hunter", "s", "prompt")) == "fresh reply"
+
+
+def test_every_new_cache_entry_records_the_model_and_provider_that_answered(tmp_path, monkeypatch):
+    router = _cache_any_router(tmp_path, monkeypatch)
+
+    async def fake_complete(self, *, model, messages, temperature, max_tokens, extra=None):
+        return _resp("reply", 5)
+
+    monkeypatch.setattr(Provider, "complete", fake_complete)
+    asyncio.run(router.chat("hunter", "s", "prompt"))
+    meta = json.loads((router.cache_dir / f"{cache_key('*', 's', 'prompt', 0.3, 0)}.meta.json").read_text())
+    assert meta == {"model": "primary-model", "provider": "primary"}
 
 
 def test_judge_cache_stays_model_specific(tmp_path, monkeypatch):

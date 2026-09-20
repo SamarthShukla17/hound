@@ -223,6 +223,23 @@ class Router:
         except RuntimeError:
             return False
 
+    def _cached_reply_is_usable(self, role: str, key_model: str, meta_path: Path) -> tuple:
+        """(usable, why_not). Only model-agnostic keys need checking (a model-specific key names
+        its own model). A reply is replayed only if the model that ANSWERED it is a target
+        currently configured for this role; otherwise a reply from a model since removed
+        (say openrouter/free) would be pinned forever. An entry with no recorded model can't
+        be verified, so it is not replayed."""
+        if key_model != "*":
+            return True, ""
+        try:
+            answered_by = json.loads(meta_path.read_text()).get("model")
+        except (OSError, json.JSONDecodeError):
+            return False, "no recorded answering model"
+        configured = {t["model"] for t in self.roles.get(role, [])}
+        if answered_by in configured:
+            return True, ""
+        return False, f"answered by {answered_by!r}, not a configured target for role {role!r}"
+
     def _resolve_max_tokens(self, role: str, target: dict, explicit) -> int:
         """explicit argument > the target's own max_tokens > role map > default."""
         if explicit is not None:
@@ -333,6 +350,7 @@ class Router:
             {"role": "user", "content": user},
         ]
         last_error = None
+        skip_reported: set = set()
 
         for target, provider in self.targets(role):
             model = target["model"]
@@ -340,9 +358,15 @@ class Router:
             key_model = "*" if role in self.cache_any_model else model
             key = cache_key(key_model, system, user, temperature, self.seed, cache_salt)
             path = self.cache_dir / f"{key}.txt"
+            meta_path = self.cache_dir / f"{key}.meta.json"
 
             if not self.fresh and path.exists():
-                return path.read_text()
+                usable, why_not = self._cached_reply_is_usable(role, key_model, meta_path)
+                if usable:
+                    return path.read_text()
+                if why_not not in skip_reported:
+                    skip_reported.add(why_not)
+                    print(f"[llm] cached reply skipped, re-calling: {why_not}")
 
             resolved_max_tokens = self._resolve_max_tokens(role, target, max_tokens)
             text, error, meta = await self._call_with_retries(
@@ -376,6 +400,7 @@ class Router:
                 return text
 
             path.write_text(text)
+            meta_path.write_text(json.dumps({"model": model, "provider": provider.name}))
             return text
 
         raise RuntimeError(f"all targets failed for role {role!r}: {last_error}")
