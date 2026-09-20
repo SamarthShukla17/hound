@@ -70,7 +70,7 @@ max_tokens:
   judge: 6000
   judge2: 6000
   poc: 8000
-  scorer: 8000
+  scorer: 24000
 
 # Reasoning is switched off where the provider supports it, via `extra` (passed straight to
 # the SDK call):

@@ -31,7 +31,7 @@ DEFAULT_MAX_TOKENS = {
     "judge": 6000,
     "judge2": 6000,
     "poc": 8000,
-    "scorer": 8000,
+    "scorer": 24000,
 }
 FALLBACK_MAX_TOKENS = 2048
 TRUNCATION_RATIO = 0.95
