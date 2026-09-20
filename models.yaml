@@ -89,8 +89,10 @@ roles:
     - {provider: openrouter, model: openrouter/free, extra: {extra_body: {reasoning: {enabled: false}}}}
 
   # Temperature is already 0 for judge calls (see agents.judge). PAID primary, free fallback.
+  # z-ai/glm-5.3-flash has MANDATORY reasoning (a reasoning-off extra 400s: "Reasoning is
+  # mandatory for this endpoint"), so no extra here — its thinking counts against max_tokens.
   judge:
-    - {provider: openrouter, model: z-ai/glm-5.3-flash, extra: {extra_body: {reasoning: {enabled: false}}}}
+    - {provider: openrouter, model: z-ai/glm-5.3-flash}
     - {provider: zai, model: glm-4.7-flash, extra: {extra_body: {thinking: {type: disabled}}}}
     # PAID, re-enable later:
     # - {provider: openai, model: gpt-5.6-luna, extra: {reasoning_effort: high}}
@@ -105,7 +107,7 @@ roles:
     - {provider: zai, model: glm-4.7-flash, extra: {extra_body: {thinking: {type: disabled}}}}
 
   scorer:
-    - {provider: openrouter, model: z-ai/glm-5.3-flash, extra: {extra_body: {reasoning: {enabled: false}}}}
+    - {provider: openrouter, model: z-ai/glm-5.3-flash}
     - {provider: zai, model: glm-4.7-flash, extra: {extra_body: {thinking: {type: disabled}}}}
 
 # $ per million tokens: [input, output]. Approximate — verify before trusting cost reports.
