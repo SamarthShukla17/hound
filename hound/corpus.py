@@ -58,8 +58,10 @@ def recent(n: int = 40, path=None) -> str:
 def kill_finding(run_dir, finding_id: str, reason: str, path=None) -> dict:
     """Read `finding_id` out of run_dir/findings.json and append it to the
     corpus with a human-supplied reason."""
+    from .runs import read_findings
+
     findings_path = Path(run_dir) / "findings.json"
-    findings = json.loads(findings_path.read_text())
+    _, findings = read_findings(run_dir)
     match = next((f for f in findings if f.get("id") == finding_id), None)
     if match is None:
         raise ValueError(f"finding {finding_id!r} not found in {findings_path}")

@@ -35,8 +35,8 @@ class FakeRouter:
         self.chat_error = chat_error
         self.calls = []
 
-    async def chat_json(self, role, system, user, *, temperature=0.3, max_tokens=2048):
-        self.calls.append({"role": role, "system": system, "user": user, "temperature": temperature})
+    async def chat_json(self, role, system, user, *, temperature=0.3, max_tokens=2048, cache_salt=""):
+        self.calls.append({"role": role, "system": system, "user": user, "temperature": temperature, "salt": cache_salt})
         if self.chat_json_error is not None:
             raise self.chat_json_error
         if self.chat_json_results is not None:
@@ -245,3 +245,16 @@ def test_judge_call_that_raises_is_not_repaired_it_is_needs_poc(kb):
     result = asyncio.run(judge(r, kb, "judge", CAND, CODE))
     assert result.verdict == "needs_poc"
     assert len(r.calls) == 1
+
+
+def test_judge_forwards_the_cache_salt_including_on_the_repair_call(kb):
+    good = {"verdict": "kill", "reason": "guarded", "severity": None, "killed_by": "x"}
+    r = FakeRouter(chat_json_results=[MISSING_VERDICT, good])
+    asyncio.run(judge(r, kb, "judge", CAND, CODE, cache_salt="abc123"))
+    assert [c["salt"] for c in r.calls] == ["abc123", "abc123"]
+
+
+def test_no_salt_is_sent_when_none_is_given(kb):
+    r = FakeRouter(chat_json_result={"verdict": "kill", "reason": "x"})
+    asyncio.run(judge(r, kb, "judge", CAND, CODE))
+    assert r.calls[0]["salt"] == ""

@@ -7,7 +7,7 @@ import textwrap
 
 import pytest
 
-from hound.score import score
+from hound.score import score, select_scored
 from tests.mock_server import MockServer
 
 
@@ -138,6 +138,9 @@ class FakeScorerRouter:
     def __init__(self, models_path=None, local_only=False):
         pass
 
+    def report(self):
+        return {"models": [], "total_usd": 0.0, "calls": []}
+
     async def chat_json(self, role, system, user, *, temperature=0.3, max_tokens=None):
         type(self).calls += 1
         item = type(self).responses.pop(0)
@@ -236,3 +239,87 @@ def test_missing_findings_json_fails_gracefully(tmp_path, capsys):
     args = _score_args(run_dir=str(tmp_path / "nope"), truth=str(truth), models="unused.yaml")
     assert asyncio.run(score(args)) == 1
     assert "cannot read inputs" in capsys.readouterr().out
+
+
+# --- which findings a score covers, per judge mode ---------------------------------
+
+
+def _f(fid, verdict, hard=False):
+    return {"id": fid, "verdict": {"verdict": verdict}, "hard_kill": hard}
+
+
+FINDINGS = [_f("F001", "keep"), _f("F002", "kill"), _f("F003", "needs_poc"), _f("F004", "kill", hard=True)]
+
+
+def _ids(fs):
+    return [f["id"] for f in fs]
+
+
+def test_advisory_default_scores_everything_except_deterministic_gate_kills():
+    assert _ids(select_scored(FINDINGS, "advisory")) == ["F001", "F002", "F003"]
+
+
+def test_gate_default_scores_only_what_the_judge_did_not_kill():
+    assert _ids(select_scored(FINDINGS, "gate")) == ["F001", "F003"]
+
+
+def test_as_gate_shows_what_a_gate_would_have_kept_even_on_an_advisory_run():
+    assert _ids(select_scored(FINDINGS, "advisory", as_gate=True)) == ["F001", "F003"]
+
+
+def test_include_killed_scores_literally_everything():
+    assert _ids(select_scored(FINDINGS, "advisory", include_killed=True)) == ["F001", "F002", "F003", "F004"]
+
+
+def test_a_legacy_run_with_no_hard_kill_flag_is_read_as_gate_mode(run_dir, fake_router, capsys):
+    fake_router.responses = [_scores([("EXACT", "F001", "matches F001")])]
+    assert _run(run_dir) == 0  # run_dir fixture writes the legacy bare-list format
+    assert "judge_mode=gate" in capsys.readouterr().out
+
+
+# --- provenance + cost line ----------------------------------------------------------
+
+
+def _modern_run(tmp_path, provenance):
+    findings = [_finding("F001", "kept bug", "keep"), _finding("F002", "judge killed", "kill")]
+    doc = {"judge_mode": "advisory", "provenance": provenance, "findings": findings}
+    (tmp_path / "findings.json").write_text(json.dumps(doc))
+    truth = tmp_path / "truth.md"
+    truth.write_text("gt")
+    return tmp_path, truth
+
+
+def test_score_warns_loudly_when_the_working_tree_no_longer_matches_the_run(tmp_path, fake_router, capsys):
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "V.sol").write_text("contract V {}\n")
+    provenance = {"target": str(target), "commit": None, "dirty": None,
+                  "files": {"V.sol": {"sha256": "0" * 64, "n_lines": 1}}}  # recorded hash != disk
+    fake_router.responses = [_scores([("MISS", None, "nothing")])]
+    assert _run(_modern_run(tmp_path, provenance)) == 0
+
+    out = capsys.readouterr().out
+    assert "WARNING: run provenance does not match the working tree" in out
+    assert "V.sol: content changed since it was read" in out
+    stored = json.loads((tmp_path / "score.json").read_text())
+    assert stored["provenance_mismatches"]
+
+
+def test_score_is_quiet_when_provenance_matches(tmp_path, fake_router, capsys):
+    from hound.codebase import file_sha256
+
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "V.sol").write_text("contract V {}\n")
+    provenance = {"target": str(target), "commit": None, "dirty": None,
+                  "files": {"V.sol": {"sha256": file_sha256(target / "V.sol"), "n_lines": 1}}}
+    fake_router.responses = [_scores([("MISS", None, "nothing")])]
+    assert _run(_modern_run(tmp_path, provenance)) == 0
+    assert "WARNING: run provenance" not in capsys.readouterr().out
+
+
+def test_score_prints_a_cost_line_like_scan(run_dir, fake_router, capsys):
+    fake_router.responses = [_scores([("MISS", None, "nothing")])]
+    assert _run(run_dir) == 0
+    out = capsys.readouterr().out
+    assert '"total_usd"' in out and '"models"' in out

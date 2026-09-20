@@ -71,13 +71,27 @@ def _find(path: str, files):
     return None
 
 
-def spans(location: str, files):
+def spans(location: str, files, expected_hash=None):
     """(src, a, b) for every citation in `location` that resolves to a real
-    file and an in-range line span. Everything else is dropped silently."""
+    file and an in-range line span. Everything else is dropped silently.
+
+    `expected_hash` (a sha256 string or a collection of them) is what the file
+    hashed to when the hunter read it. If given, a span whose resolved file now
+    hashes to something else is STALE and is dropped like any other invalid span:
+    the cited line still exists, but it is not the code that was cited. Matching
+    is on content, so the same content at a different path still resolves.
+    """
+    if isinstance(expected_hash, str):
+        expected_hash = {expected_hash}
+    elif expected_hash is not None:
+        expected_hash = set(expected_hash)
+
     result = []
     for path, a, b in parse_locations(location):
         src = _find(path, files)
         if src is None:
+            continue
+        if expected_hash and src.sha256 not in expected_hash:
             continue
         if 1 <= a <= b <= len(src.lines):
             result.append((src, a, b))

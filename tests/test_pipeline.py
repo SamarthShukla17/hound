@@ -8,7 +8,10 @@ from pathlib import Path
 
 import pytest
 
-from hound.pipeline import scan
+from hound.codebase import check_provenance, file_sha256, load
+from hound.pipeline import _cited_salt, citation_gate, scan
+from hound.runs import CITATION_GATE, STALE_CITATION
+from hound.schema import Verdict
 from tests.mock_server import FIXTURE_LOCATION, MockServer
 
 FIXTURE_VAULT_SOL = textwrap.dedent(
@@ -76,6 +79,7 @@ def _scan_args(**overrides) -> argparse.Namespace:
         seed=0,
         fresh=True,
         no_judge2=False,
+        judge_mode="advisory",
         dry_run=False,
         out=None,
         models=None,
@@ -136,7 +140,9 @@ def test_scan_end_to_end_against_mock_server(fixture_repo, kb_dir, tmp_path, mon
         assert len(run_dirs) == 1
         out_dir = run_dirs[0]
 
-        findings = json.loads((out_dir / "findings.json").read_text())
+        doc = json.loads((out_dir / "findings.json").read_text())
+        assert doc["judge_mode"] == "advisory"
+        findings = doc["findings"]
         by_title = {f["title"]: f for f in findings}
 
         # the valid finding survives to keep
@@ -147,7 +153,8 @@ def test_scan_end_to_end_against_mock_server(fixture_repo, kb_dir, tmp_path, mon
         # the bad-path finding is killed by the citation gate
         bad_path = by_title["Bug in a file that does not exist"]
         assert bad_path["verdict"]["verdict"] == "kill"
-        assert bad_path["verdict"]["killed_by"] == "citation gate"
+        assert bad_path["verdict"]["killed_by"] == CITATION_GATE
+        assert bad_path["hard_kill"] is True and valid["hard_kill"] is False
 
         # the malformed entry never appears anywhere
         assert "Malformed entry missing required fields" not in by_title
@@ -183,3 +190,191 @@ def test_rerun_resumes_entirely_from_the_disk_cache(fixture_repo, kb_dir, tmp_pa
 
         assert asyncio.run(scan(args)) == 0
         assert mock.request_count == after_first
+
+
+# --- provenance -------------------------------------------------------------------------
+
+
+def _run_scan(fixture_repo, kb_dir, tmp_path, monkeypatch, mock, **overrides):
+    monkeypatch.chdir(tmp_path)
+    models_path = tmp_path / "models.yaml"
+    models_path.write_text(_models_yaml(mock.base_url))
+    out = tmp_path / "runs"
+    args = _scan_args(target=str(fixture_repo), kb=kb_dir, out=str(out), models=str(models_path), **overrides)
+    import asyncio
+
+    assert asyncio.run(scan(args)) == 0
+    out_dir = next(out.iterdir())
+    return out_dir, json.loads((out_dir / "findings.json").read_text())
+
+
+def test_provenance_round_trips_through_findings_json_and_map_json(fixture_repo, kb_dir, tmp_path, monkeypatch):
+    with MockServer() as mock:
+        out_dir, doc = _run_scan(fixture_repo, kb_dir, tmp_path, monkeypatch, mock)
+
+    vault = fixture_repo / "src" / "Vault.sol"
+    expected = {"sha256": file_sha256(vault), "n_lines": len(FIXTURE_VAULT_SOL.splitlines())}
+
+    # findings.json: provenance names exactly the cited file(s), with hash + line count
+    assert doc["provenance"]["files"] == {"src/Vault.sol": expected}
+    assert doc["provenance"]["commit"] is None and doc["provenance"]["dirty"] is None  # tmp dir, no repo
+    assert doc["provenance"]["target"] == str(fixture_repo.resolve())
+
+    # every finding carries the hash of what it cited, captured at hunt time
+    by_title = {f["title"]: f for f in doc["findings"]}
+    assert by_title["Reentrancy in withdraw"]["cited"] == {"src/Vault.sol": expected["sha256"]}
+    assert by_title["Bug in a file that does not exist"]["cited"] == {}
+
+    # map.json carries provenance for everything the mapper read, plus the full (valid JSON) map
+    map_doc = json.loads((out_dir / "map.json").read_text())
+    assert map_doc["provenance"]["files"] == {"src/Vault.sol": expected}
+    assert map_doc["map"]["summary"]
+
+    # and the recorded provenance checks clean against the untouched tree, dirty once edited
+    assert check_provenance(doc["provenance"]) == []
+    vault.write_text(FIXTURE_VAULT_SOL + "// edited later\n")
+    assert check_provenance(doc["provenance"]) == ["src/Vault.sol: content changed since it was read"]
+
+
+def test_a_file_edited_between_hunt_and_gate_is_killed_as_a_stale_citation(fixture_repo, kb_dir, tmp_path, monkeypatch):
+    import hound.pipeline as pipeline
+
+    real_load = pipeline.load
+    calls = {"n": 0}
+
+    def load_then_edit_before_the_gate_reload(*a, **kw):
+        calls["n"] += 1
+        if calls["n"] == 2:  # the gate's fresh reload: the file changed after the hunter read it
+            (fixture_repo / "src" / "Vault.sol").write_text(FIXTURE_VAULT_SOL + "// someone added a guard\n")
+        return real_load(*a, **kw)
+
+    monkeypatch.setattr(pipeline, "load", load_then_edit_before_the_gate_reload)
+    with MockServer() as mock:
+        out_dir, doc = _run_scan(fixture_repo, kb_dir, tmp_path, monkeypatch, mock)
+
+    valid = {f["title"]: f for f in doc["findings"]}["Reentrancy in withdraw"]
+    assert valid["verdict"]["verdict"] == "kill"
+    assert valid["verdict"]["killed_by"] == STALE_CITATION == "stale citation (file changed since hunt)"
+    assert valid["hard_kill"] is True
+    assert not list((out_dir / "pocs").glob("*"))  # never judged, never given a PoC
+
+
+def _write(path, text):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+
+
+def _cand(loc, cited):
+    return {"id": "F001", "location": loc, "cited": cited}
+
+
+def test_gate_same_path_edited_content_is_stale(tmp_path):
+    f = tmp_path / "src" / "Vault.sol"
+    _write(f, FIXTURE_VAULT_SOL)
+    cited = {"src/Vault.sol": load(tmp_path)[0][0].sha256}
+
+    _write(f, FIXTURE_VAULT_SOL.replace("insufficient", "insufficient balance"))  # same path, new content
+    queue, hard = citation_gate([_cand("src/Vault.sol:12-14", cited)], load(tmp_path)[0])
+
+    assert queue == [] and hard["F001"].killed_by == STALE_CITATION
+
+
+def test_gate_same_content_at_a_different_path_still_resolves(tmp_path):
+    _write(tmp_path / "old" / "Vault.sol", FIXTURE_VAULT_SOL)
+    cited = {"old/Vault.sol": load(tmp_path)[0][0].sha256}
+
+    (tmp_path / "old" / "Vault.sol").unlink()
+    _write(tmp_path / "moved" / "core" / "Vault.sol", FIXTURE_VAULT_SOL)  # identical bytes, new path
+    queue, hard = citation_gate([_cand("Vault.sol:12-14", cited)], load(tmp_path)[0])
+
+    assert len(queue) == 1 and hard == {}
+
+
+def test_gate_distinguishes_unresolvable_from_stale(tmp_path):
+    _write(tmp_path / "src" / "Vault.sol", FIXTURE_VAULT_SOL)
+    files = load(tmp_path)[0]
+    queue, hard = citation_gate([_cand("NoSuchFile.sol:5", {}), _cand("src/Vault.sol:9999", {})], files)
+    assert queue == []
+    assert {v.killed_by for v in hard.values()} == {CITATION_GATE}
+
+
+def test_cited_salt_tracks_the_cited_file_contents():
+    a = {"cited": {"src/A.sol": "h1", "src/B.sol": "h2"}}
+    assert _cited_salt(a) == _cited_salt({"cited": {"src/B.sol": "h2", "src/A.sol": "h1"}})  # order-free
+    assert _cited_salt(a) != _cited_salt({"cited": {"src/A.sol": "h1-edited", "src/B.sol": "h2"}})
+    assert _cited_salt({"cited": {}}) == "" == _cited_salt({})
+
+
+def test_the_judge_is_called_with_a_cache_salt_derived_from_the_cited_file(fixture_repo, kb_dir, tmp_path, monkeypatch):
+    import hound.pipeline as pipeline
+
+    seen = []
+
+    async def spy_judge(router, kb, role, cand, code, **kw):
+        seen.append((role, kw.get("cache_salt")))
+        return Verdict(verdict="keep", reason="ok")
+
+    monkeypatch.setattr(pipeline, "judge", spy_judge)
+    with MockServer() as mock:
+        _run_scan(fixture_repo, kb_dir, tmp_path, monkeypatch, mock, no_judge2=True)
+
+    assert seen and all(salt for _, salt in seen)
+
+
+# --- judge modes ------------------------------------------------------------------------
+
+
+def _kill_everything(monkeypatch):
+    import hound.pipeline as pipeline
+
+    async def judge_that_kills(router, kb, role, cand, code, **kw):
+        return Verdict(verdict="kill", reason="a guard at line 5 prevents this", killed_by="Vault.sol:5")
+
+    monkeypatch.setattr(pipeline, "judge", judge_that_kills)
+
+
+def test_advisory_mode_annotates_but_removes_nothing(fixture_repo, kb_dir, tmp_path, monkeypatch):
+    _kill_everything(monkeypatch)
+    with MockServer() as mock:
+        out_dir, doc = _run_scan(fixture_repo, kb_dir, tmp_path, monkeypatch, mock, judge_mode="advisory")
+
+    valid = {f["title"]: f for f in doc["findings"]}["Reentrancy in withdraw"]
+    assert doc["judge_mode"] == "advisory"
+    assert valid["verdict"]["verdict"] == "kill" and valid["hard_kill"] is False  # opinion, not removal
+
+    report = (out_dir / "report.md").read_text()
+    assert "Judge mode: **advisory**" in report
+    assert "| id | judge |" in report
+    assert "## F001 — Reentrancy in withdraw" in report  # detail section still shown
+    assert "Judge: kill — a guard at line 5 prevents this" in report
+    assert "## Killed by the judge" not in report
+    assert "## Removed by deterministic gates" in report  # the hallucinated-path finding
+
+
+def test_gate_mode_removes_judge_kills_from_the_report_detail(fixture_repo, kb_dir, tmp_path, monkeypatch):
+    _kill_everything(monkeypatch)
+    with MockServer() as mock:
+        out_dir, doc = _run_scan(fixture_repo, kb_dir, tmp_path, monkeypatch, mock, judge_mode="gate")
+
+    assert doc["judge_mode"] == "gate"
+    report = (out_dir / "report.md").read_text()
+    assert "## F001 — Reentrancy in withdraw" not in report
+    assert "## Killed by the judge" in report and "F001" in report
+
+
+def test_advisory_report_orders_by_votes_then_severity(tmp_path):
+    from hound.pipeline import _render_report
+
+    files = load(tmp_path)[0]
+    cands = [
+        {"id": "F001", "title": "few votes critical", "severity": "critical", "votes": 1, "lenses": ["A1"],
+         "location": "x.sol:1", "root_cause": "", "impact": "", "exploit_steps": []},
+        {"id": "F002", "title": "many votes medium", "severity": "medium", "votes": 3, "lenses": ["A1", "P1", "P2"],
+         "location": "x.sol:1", "root_cause": "", "impact": "", "exploit_steps": []},
+        {"id": "F003", "title": "many votes high", "severity": "high", "votes": 3, "lenses": ["A1", "P1", "P3"],
+         "location": "x.sol:1", "root_cause": "", "impact": "", "exploit_steps": []},
+    ]
+    verdicts = {c["id"]: Verdict(verdict="kill", reason="r") for c in cands}
+    report = _render_report("t", cands, verdicts, files, "advisory", frozenset())
+    table_ids = [line.split("|")[1].strip() for line in report.splitlines() if line.startswith("| F")]
+    assert table_ids == ["F003", "F002", "F001"]

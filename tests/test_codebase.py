@@ -4,7 +4,10 @@ import re
 
 import pytest
 
-from hound.codebase import Src, chunk, load
+import hashlib
+import subprocess
+
+from hound.codebase import Src, build_provenance, check_provenance, chunk, file_sha256, git_info, load
 
 
 @pytest.fixture
@@ -109,3 +112,74 @@ def test_whole_small_files_are_greedy_packed_together():
     ]
     assert len(chunk(files, budget_chars=10_000)) == 1
     assert len(chunk(files, budget_chars=1)) == 3  # too small to combine any two
+
+
+# --- provenance -------------------------------------------------------------------------
+
+
+def test_load_records_the_sha256_of_the_raw_file_bytes(fixture_repo):
+    files, _ = load(fixture_repo)
+    vault = next(f for f in files if f.path.name == "Vault.sol")
+    assert vault.sha256 == hashlib.sha256((fixture_repo / "src" / "Vault.sol").read_bytes()).hexdigest()
+    assert vault.n_lines == 1
+
+
+def test_a_hand_built_src_still_gets_a_deterministic_hash():
+    a = Src(path="a.sol", lines=["x", "y"])
+    assert a.sha256 == Src(path="elsewhere/b.sol", lines=["x", "y"]).sha256  # content, not path
+    assert a.sha256 != Src(path="a.sol", lines=["x", "z"]).sha256
+
+
+def test_build_provenance_lists_every_file_with_hash_and_line_count(fixture_repo):
+    files, _ = load(fixture_repo)
+    prov = build_provenance(fixture_repo, files)
+    assert prov["files"]["src/Vault.sol"] == {"sha256": file_sha256(fixture_repo / "src" / "Vault.sol"), "n_lines": 1}
+    assert prov["commit"] is None and prov["dirty"] is None  # tmp_path is not a git repo
+
+
+def test_check_provenance_is_clean_then_flags_an_edit_and_a_deletion(fixture_repo):
+    files, _ = load(fixture_repo)
+    prov = build_provenance(fixture_repo, files)
+    assert check_provenance(prov) == []
+
+    (fixture_repo / "src" / "Vault.sol").write_text("contract Vault { /* edited */ }\n")
+    (fixture_repo / "src" / "Token.sol").unlink()
+    problems = check_provenance(prov)
+    assert "src/Vault.sol: content changed since it was read" in problems
+    assert "src/Token.sol: file no longer exists" in problems
+
+
+def _git(repo, *args):
+    subprocess.run(["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=t", *args],
+                   check=True, capture_output=True)
+
+
+def test_git_info_reports_commit_and_dirty_flag(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "A.sol").write_text("contract A {}\n")
+    _git(repo, "init", "-q")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-q", "-m", "init")
+
+    clean = git_info(repo)
+    assert len(clean["commit"]) == 40 and clean["dirty"] is False
+
+    (repo / "A.sol").write_text("contract A { uint x; }\n")
+    assert git_info(repo)["dirty"] is True
+
+
+def test_check_provenance_flags_a_moved_git_commit(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "A.sol").write_text("contract A {}\n")
+    _git(repo, "init", "-q")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-q", "-m", "one")
+    files, _ = load(repo)
+    prov = build_provenance(repo, files)
+
+    (repo / "B.sol").write_text("contract B {}\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-q", "-m", "two")
+    assert any(p.startswith("git commit changed") for p in check_provenance(prov))

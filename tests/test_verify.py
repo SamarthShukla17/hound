@@ -176,3 +176,36 @@ def test_dedup_does_not_mutate_input_candidates(files):
     dedup(original, files)
     assert "id" not in original[0]
     assert "votes" in original[0] and original[0]["votes"] == 1
+
+
+# --- expected_hash: staleness ---------------------------------------------------------
+
+
+def test_spans_with_matching_expected_hash_resolves(files, vault):
+    assert spans("Vault.sol:12", files, expected_hash=vault.sha256) == [(vault, 12, 12)]
+
+
+def test_spans_with_a_different_expected_hash_is_stale_and_dropped(files, vault):
+    # the cited line exists and is in range, but the file is not what the hunter read
+    assert spans("Vault.sol:12", files) == [(vault, 12, 12)]
+    assert spans("Vault.sol:12", files, expected_hash="deadbeef" * 8) == []
+
+
+def test_expected_hash_may_be_a_collection_of_hashes(files, vault):
+    assert spans("Vault.sol:12", files, expected_hash={"other", vault.sha256}) == [(vault, 12, 12)]
+    assert spans("Vault.sol:12", files, expected_hash={"other"}) == []
+
+
+def test_same_content_at_a_different_path_still_resolves_with_the_hash():
+    lines = [f"line_{i}" for i in range(1, 50)]
+    original = Src(path="src/Vault.sol", lines=lines)
+    moved = Src(path="contracts/core/Vault.sol", lines=list(lines))
+    assert moved.sha256 == original.sha256
+    assert spans("Vault.sol:12", [moved], expected_hash=original.sha256) == [(moved, 12, 12)]
+
+
+def test_edited_content_at_the_same_path_is_stale():
+    original = Src(path="src/Vault.sol", lines=[f"line_{i}" for i in range(1, 50)])
+    edited = Src(path="src/Vault.sol", lines=[f"line_{i}" for i in range(1, 50)] + ["// a new guard"])
+    assert edited.sha256 != original.sha256
+    assert spans("src/Vault.sol:12", [edited], expected_hash=original.sha256) == []

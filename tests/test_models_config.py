@@ -61,3 +61,8 @@ def test_role_max_tokens_are_positive_ints_for_known_roles():
     for role, value in config["max_tokens"].items():
         assert role in config["roles"]
         assert isinstance(value, int) and value > 0
+
+
+def test_judge_and_scorer_have_the_large_reasoning_budget():
+    caps = load_models_config()["max_tokens"]
+    assert caps["judge"] == 24000 and caps["judge2"] == 24000 and caps["scorer"] == 24000

@@ -28,8 +28,8 @@ TERMINAL_STATUS_CODES = {400, 401, 403, 404}
 DEFAULT_MAX_TOKENS = {
     "mapper": 8000,
     "hunter": 20000,
-    "judge": 6000,
-    "judge2": 6000,
+    "judge": 24000,
+    "judge2": 24000,
     "poc": 8000,
     "scorer": 24000,
 }
@@ -57,8 +57,13 @@ def extract_json(text: str):
         return None
 
 
-def cache_key(model: str, system: str, user: str, temperature: float, seed) -> str:
-    payload = json.dumps([model, system, user, temperature, seed], sort_keys=True)
+def cache_key(model: str, system: str, user: str, temperature: float, seed, salt: str = "") -> str:
+    # `salt` (e.g. a hash of the cited files) only enters the key when given, so calls that
+    # don't use one keep their existing keys.
+    parts = [model, system, user, temperature, seed]
+    if salt:
+        parts.append(salt)
+    payload = json.dumps(parts, sort_keys=True)
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
@@ -302,6 +307,7 @@ class Router:
         *,
         temperature: float = 0.3,
         max_tokens: int | None = None,
+        cache_salt: str = "",
     ) -> str:
         messages = [
             {"role": "system", "content": system},
@@ -312,7 +318,7 @@ class Router:
         for target, provider in self.targets(role):
             model = target["model"]
             extra = target.get("extra") or {}
-            key = cache_key(model, system, user, temperature, self.seed)
+            key = cache_key(model, system, user, temperature, self.seed, cache_salt)
             path = self.cache_dir / f"{key}.txt"
 
             if not self.fresh and path.exists():
@@ -341,6 +347,14 @@ class Router:
                     last_error = RuntimeError("empty reply")
                 continue
 
+            if meta and meta["finish_reason"] == "length":
+                # Cut off at max_tokens: usable at best, but never replay it from the cache.
+                print(
+                    f"[llm] TRUNCATED BY max_tokens: {model}, raise max_tokens for role {role} "
+                    f"(used {meta['completion_tokens']}/{resolved_max_tokens}); reply returned but not cached"
+                )
+                return text
+
             path.write_text(text)
             return text
 
@@ -354,8 +368,11 @@ class Router:
         *,
         temperature: float = 0.3,
         max_tokens: int | None = None,
+        cache_salt: str = "",
     ) -> dict:
-        text = await self.chat(role, system, user, temperature=temperature, max_tokens=max_tokens)
+        text = await self.chat(
+            role, system, user, temperature=temperature, max_tokens=max_tokens, cache_salt=cache_salt
+        )
         data = extract_json(text)
         if data is not None:
             return data
@@ -364,7 +381,9 @@ class Router:
             "The text below was supposed to be a single JSON object but failed to "
             "parse. Return ONLY the corrected JSON object, nothing else.\n\n" + text
         )
-        repaired = await self.chat(role, system, repair_user, temperature=0.0, max_tokens=max_tokens)
+        repaired = await self.chat(
+            role, system, repair_user, temperature=0.0, max_tokens=max_tokens, cache_salt=cache_salt
+        )
         data = extract_json(repaired)
         if data is not None:
             return data

@@ -67,8 +67,8 @@ providers:
 max_tokens:
   mapper: 8000
   hunter: 20000
-  judge: 6000
-  judge2: 6000
+  judge: 24000
+  judge2: 24000
   poc: 8000
   scorer: 24000
 

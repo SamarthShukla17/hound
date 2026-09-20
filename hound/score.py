@@ -6,7 +6,9 @@ import re
 from collections import Counter
 from pathlib import Path
 
+from .codebase import check_provenance
 from .llm import Router
+from .runs import is_hard_kill, read_findings
 
 RETRY_DELAY_SECONDS = 30
 DEGENERATE_SHARE = 0.8
@@ -116,19 +118,55 @@ async def _call_scorer(router, user_prompt: str):
             raise
 
 
+def select_scored(findings: list, mode: str, include_killed: bool = False, as_gate: bool = False) -> list:
+    """Which findings a score covers.
+
+    advisory run: everything except deterministic-gate kills (the judge only annotated).
+    gate run (and legacy runs): everything the judge did not kill.
+    --as-gate: what a judge gate WOULD have kept, on any run (drops every judge kill).
+    --include-killed: everything, including deterministic-gate kills.
+    """
+    def judge_killed(f):
+        return (f.get("verdict") or {}).get("verdict") == "kill"
+
+    if include_killed:
+        return list(findings)
+    if as_gate or mode != "advisory":
+        return [f for f in findings if not judge_killed(f)]
+    return [f for f in findings if not is_hard_kill(f)]
+
+
+def _provenance_warnings(meta: dict) -> list:
+    provenance = meta.get("provenance")
+    if not provenance:
+        print("note: this run has no provenance (written before provenance existed); "
+              "cannot check the working tree against what was read")
+        return []
+    problems = check_provenance(provenance)
+    for p in problems:
+        print(f"WARNING: run provenance does not match the working tree — {p}")
+    if problems:
+        print("WARNING: the code changed since this run read it; finding locations may no longer "
+              "point at the code that was cited.")
+    return problems
+
+
 async def score(args) -> int:
     run_dir = Path(args.run_dir)
     try:
-        findings = json.loads((run_dir / "findings.json").read_text())
+        meta, findings = read_findings(run_dir)
         truth_text = Path(args.truth).read_text()
     except (OSError, json.JSONDecodeError) as exc:
         print(f"score: cannot read inputs: {exc}")
         return 1
 
     include_killed = getattr(args, "include_killed", False)
-    scored_findings = [
-        f for f in findings if include_killed or f.get("verdict", {}).get("verdict") != "kill"
-    ]
+    as_gate = getattr(args, "as_gate", False)
+    judge_mode = meta.get("judge_mode", "gate")
+    provenance_problems = _provenance_warnings(meta)
+    scored_findings = select_scored(findings, judge_mode, include_killed, as_gate)
+    print(f"scoring {len(scored_findings)} of {len(findings)} findings "
+          f"(run judge_mode={judge_mode}{', as-gate' if as_gate else ''}{', include-killed' if include_killed else ''})")
     candidates = [_candidate_summary(f) for f in scored_findings]
     known_ids = {f.get("id") for f in scored_findings}
 
@@ -138,6 +176,7 @@ async def score(args) -> int:
         f"CANDIDATE FINDINGS:\n{json.dumps(candidates, indent=2, sort_keys=True)}"
     )
 
+    router = None
     try:
         router = Router(models_path=args.models, local_only=args.local_only)
         data = await _call_scorer(router, user_prompt)
@@ -191,8 +230,14 @@ async def score(args) -> int:
         "weighted_recall_pct": weighted_recall,
         "precision_proxy_pct": precision,
         "include_killed": include_killed,
+        "as_gate": as_gate,
+        "judge_mode": judge_mode,
+        "scored_finding_ids": sorted(known_ids),
         "degenerate_warning": degenerate,
         "downgraded": sanitize_warnings,
+        "provenance_mismatches": provenance_problems,
+        "cost": router.report(),
     }
     (run_dir / "score.json").write_text(json.dumps(result, indent=2, sort_keys=True))
+    print(json.dumps(router.report(), indent=2))
     return 0

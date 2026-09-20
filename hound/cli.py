@@ -74,6 +74,10 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument("--seed", type=int, default=0)
     scan.add_argument("--fresh", action="store_true", help="bypass the disk cache on read")
     scan.add_argument("--no-judge2", dest="no_judge2", action="store_true")
+    scan.add_argument(
+        "--judge-mode", dest="judge_mode", choices=["advisory", "gate"], default="advisory",
+        help="advisory (default): the judge annotates, nothing is removed; gate: judge kills are removed from the scored set",
+    )
     scan.add_argument("--dry-run", dest="dry_run", action="store_true")
     scan.add_argument("--out", default="runs", help="output directory (default: runs)")
     scan.set_defaults(handler=_cmd_scan)
@@ -81,7 +85,10 @@ def build_parser() -> argparse.ArgumentParser:
     score = sub.add_parser("score", help="score a run against a ground-truth file")
     score.add_argument("run_dir")
     score.add_argument("truth")
-    score.add_argument("--include-killed", dest="include_killed", action="store_true")
+    score.add_argument("--include-killed", dest="include_killed", action="store_true",
+                       help="score every finding, including those removed by deterministic gates")
+    score.add_argument("--as-gate", dest="as_gate", action="store_true",
+                       help="score only what a judge gate would have kept (drop every judge kill)")
     score.set_defaults(handler=_cmd_score)
 
     kill = sub.add_parser("kill", help="confirm a finding as a false positive")

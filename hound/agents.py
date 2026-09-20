@@ -46,6 +46,11 @@ def _map_block(pmap) -> str:
     return f"MAP:\n{text}"
 
 
+def _salt(cache_salt: str) -> dict:
+    """Forward cache_salt only when set, so routers that don't take it still work."""
+    return {"cache_salt": cache_salt} if cache_salt else {}
+
+
 def _user_prompt(*sections: str) -> str:
     """Join non-empty sections, stable content first, variable content last.
 
@@ -84,7 +89,10 @@ async def mapper(r, kb, code: str, notes: str = "") -> dict:
     return data
 
 
-async def hunter(r, kb, lens, code: str, pmap=None, known: str = "", killed: str = "", already=None, temp: float = 0.3):
+async def hunter(
+    r, kb, lens, code: str, pmap=None, known: str = "", killed: str = "", already=None, temp: float = 0.3,
+    cache_salt: str = "",
+):
     sys_prompt = system(kb)
 
     map_block = _map_block(pmap)
@@ -113,7 +121,7 @@ async def hunter(r, kb, lens, code: str, pmap=None, known: str = "", killed: str
     user = _user_prompt(code, map_block, known_block, killed_block, already_block, lens_block, task)
 
     try:
-        data = await r.chat_json("hunter", sys_prompt, user, temperature=temp)
+        data = await r.chat_json("hunter", sys_prompt, user, temperature=temp, **_salt(cache_salt))
     except Exception as exc:  # noqa: BLE001
         print(f"[agents] hunter ({lens.id}) failed: {exc}")
         return []
@@ -140,7 +148,9 @@ async def hunter(r, kb, lens, code: str, pmap=None, known: str = "", killed: str
     return survivors
 
 
-async def judge(r, kb, role: str, cand: dict, code: str, pmap=None, known: str = "", killed: str = "") -> Verdict:
+async def judge(
+    r, kb, role: str, cand: dict, code: str, pmap=None, known: str = "", killed: str = "", cache_salt: str = ""
+) -> Verdict:
     sys_prompt = system(kb)
 
     map_block = _map_block(pmap)
@@ -169,7 +179,7 @@ async def judge(r, kb, role: str, cand: dict, code: str, pmap=None, known: str =
     user = _user_prompt(code, map_block, known_block, killed_block, cand_block, task)
 
     try:
-        data = await r.chat_json(role, sys_prompt, user, temperature=0.0)
+        data = await r.chat_json(role, sys_prompt, user, temperature=0.0, **_salt(cache_salt))
     except Exception as exc:  # noqa: BLE001 - never kill a candidate because the judge call failed
         print(f"[agents] judge ({role}) failed: {exc}")
         return Verdict(verdict="needs_poc", reason=str(exc))
@@ -190,7 +200,7 @@ async def judge(r, kb, role: str, cand: dict, code: str, pmap=None, known: str =
         '"verdict" and "reason" are required.',
     )
     try:
-        repaired = await r.chat_json(role, sys_prompt, repair_user, temperature=0.0)
+        repaired = await r.chat_json(role, sys_prompt, repair_user, temperature=0.0, **_salt(cache_salt))
         return Verdict(**repaired)
     except Exception as exc:  # noqa: BLE001
         print(f"[agents] judge ({role}) repair failed: {exc}")

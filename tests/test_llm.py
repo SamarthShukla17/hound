@@ -267,3 +267,43 @@ def test_report_includes_per_call_token_detail(models_yaml, monkeypatch):
 
     call = router.report()["calls"][0]
     assert call["role"] == "test_role" and call["completion_tokens"] == 42 and call["max_tokens"] == 2048
+
+
+def test_cache_salt_changes_the_key_but_unsalted_keys_are_unchanged():
+    plain = cache_key("m", "s", "u", 0.0, 0)
+    assert plain == cache_key("m", "s", "u", 0.0, 0, "")
+    assert cache_key("m", "s", "u", 0.0, 0, "hash-of-file-v1") != plain
+    assert cache_key("m", "s", "u", 0.0, 0, "hash-of-file-v1") != cache_key("m", "s", "u", 0.0, 0, "hash-of-file-v2")
+
+
+def test_a_salted_call_never_serves_an_entry_cached_for_different_file_contents(models_yaml, monkeypatch):
+    router = Router(models_path=str(models_yaml))
+    calls = {"n": 0}
+
+    async def fake_complete(self, *, model, messages, temperature, max_tokens, extra=None):
+        calls["n"] += 1
+        return _resp(f"verdict about version {calls['n']}", 5)
+
+    monkeypatch.setattr(Provider, "complete", fake_complete)
+
+    first = asyncio.run(router.chat("test_role", "s", "same prompt", cache_salt="file-v1"))
+    again = asyncio.run(router.chat("test_role", "s", "same prompt", cache_salt="file-v1"))
+    changed = asyncio.run(router.chat("test_role", "s", "same prompt", cache_salt="file-v2"))
+
+    assert first == again  # same file contents -> cache hit
+    assert changed != first  # file changed -> the old verdict is NOT served
+    assert calls["n"] == 2
+
+
+def test_a_reply_cut_off_at_max_tokens_is_returned_but_never_cached(models_yaml, monkeypatch, capsys):
+    router = Router(models_path=str(models_yaml))
+
+    async def fake_complete(self, *, model, messages, temperature, max_tokens, extra=None):
+        return _resp('{"findings": [', completion_tokens=max_tokens, finish_reason="length")
+
+    monkeypatch.setattr(Provider, "complete", fake_complete)
+    text = asyncio.run(router.chat("test_role", "s", "u", max_tokens=50))
+
+    assert text == '{"findings": ['
+    assert list(router.cache_dir.glob("*.txt")) == []
+    assert "TRUNCATED BY max_tokens" in capsys.readouterr().out

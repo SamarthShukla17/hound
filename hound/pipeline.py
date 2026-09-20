@@ -7,16 +7,20 @@ the operator already saw.
 """
 
 import asyncio
+import hashlib
 import json
 from datetime import datetime
 from pathlib import Path
 
 from .agents import hunter, judge, mapper, poc
-from .codebase import chunk, load
+from .codebase import build_provenance, chunk, load, rel_path
 from .knowledge import load_kb, poc_refs, select
 from .llm import Router
+from .runs import CITATION_GATE, STALE_CITATION, is_hard_kill, write_findings
 from .schema import SEV_RANK, Verdict
 from .verify import dedup, judge_context, snippets, spans
+
+JUDGE_MODES = ("advisory", "gate")
 
 _VERDICT_ORDER = {"keep": 0, "needs_poc": 1, "kill": 2}
 _MAP_LIST_FIELDS = ("actors", "entry_points", "state_machine", "subsystems", "trust_edges", "invariants")
@@ -65,11 +69,57 @@ def _severity_for_report(cand: dict, verdict: Verdict) -> str:
     return verdict.severity or cand["severity"]
 
 
+def _cited_salt(cand: dict) -> str:
+    """Hash of the exact files this candidate cites, folded into judge cache keys. The
+    judge's prompt may be only a window of the file, so an edit elsewhere in the file
+    would otherwise still hit a cached verdict about the old contents."""
+    cited = cand.get("cited") or {}
+    joined = "\n".join(f"{path}:{sha}" for path, sha in sorted(cited.items()))
+    return hashlib.sha256(joined.encode()).hexdigest() if joined else ""
+
+
+def citation_gate(cands: list, current_files: list):
+    """The deterministic hard gate. `current_files` is a FRESH load of the target.
+
+    A candidate dies if its citation no longer resolves to a real in-range line
+    (CITATION_GATE) or resolves but the file's content differs from what the hunter
+    read (STALE_CITATION). Returns (queue, hard) where hard maps id -> kill Verdict.
+    """
+    queue, hard = [], {}
+    for c in cands:
+        expected = set((c.get("cited") or {}).values())
+        if not spans(c["location"], current_files):
+            hard[c["id"]] = Verdict(
+                verdict="kill",
+                reason="location does not resolve to a real, in-range line",
+                killed_by=CITATION_GATE,
+            )
+        elif expected and not spans(c["location"], current_files, expected_hash=expected):
+            hard[c["id"]] = Verdict(
+                verdict="kill",
+                reason="the cited file's content differs from what the hunter read",
+                killed_by=STALE_CITATION,
+            )
+        else:
+            queue.append(c)
+    return queue, hard
+
+
+def _cited_provenance(full: dict, deduped: list) -> dict:
+    cited = {rel for c in deduped for rel in (c.get("cited") or {})}
+    return {**full, "files": {rel: meta for rel, meta in full["files"].items() if rel in cited}}
+
+
 async def scan(args) -> int:
     kb = load_kb(args.kb)
     scope_globs = _read_scope_globs(args.scope)
     known_text = _read_text_or_empty(args.known)
     notes_text = _read_text_or_empty(args.notes)
+
+    judge_mode = getattr(args, "judge_mode", "advisory")
+    if judge_mode not in JUDGE_MODES:
+        print(f"unknown --judge-mode {judge_mode!r} (expected one of {', '.join(JUDGE_MODES)})")
+        return 1
 
     files, refused = load(args.target, scope_globs)
     print(f"{len(files)} files in scope, {len(refused)} refused")
@@ -89,6 +139,7 @@ async def scan(args) -> int:
 
     print(f"files: {len(files)}  lines: {total_lines}  chunks: {len(chunks)}  lenses: {len(lenses)}  passes: {args.passes}")
     print(f"planned: {len(chunks)} map calls + {hunter_calls} hunter calls + up to {args.max_judge} judge calls")
+    print(f"judge mode: {judge_mode}" + (" (judge annotates; nothing it says removes a candidate)" if judge_mode == "advisory" else " (judge kills are removed from the default scored set)"))
 
     if args.dry_run:
         for lens in lenses:
@@ -104,7 +155,10 @@ async def scan(args) -> int:
 
     run_dir = Path(args.out) / datetime.now().strftime("%Y%m%d-%H%M%S")
     run_dir.mkdir(parents=True, exist_ok=True)
-    (run_dir / "map.json").write_text(map_text or "{}")
+    provenance_all = build_provenance(args.target, files)
+    (run_dir / "map.json").write_text(
+        json.dumps({"provenance": provenance_all, "map": merged_map}, indent=2, sort_keys=True)
+    )
 
     # --- HUNT ---
     # TODO(step 8): thread hound.corpus.recent() through as `killed` once it exists.
@@ -121,24 +175,22 @@ async def scan(args) -> int:
         for findings in await asyncio.gather(*tasks):
             for finding in findings:
                 finding["pass"] = p
+                # sha256 of each file this finding cites, as the hunter read it.
+                finding["cited"] = {
+                    rel_path(args.target, src.path): src.sha256 for src, _, _ in spans(finding["location"], files)
+                }
                 found.append(finding)
 
     # --- DEDUP ---
     deduped = dedup(found, files)
     print(f"{len(found)} raw -> {len(deduped)} unique")
 
-    # --- CITATION GATE ---
-    verdicts = {}
-    queue = []
-    for c in deduped:
-        if spans(c["location"], files):
-            queue.append(c)
-        else:
-            verdicts[c["id"]] = Verdict(
-                verdict="kill",
-                reason="location does not resolve to a real, in-range line",
-                killed_by="citation gate",
-            )
+    # --- CITATION GATE (deterministic; a hard gate in both judge modes) ---
+    # Reload from disk: a file edited since the hunter read it must not be judged as if
+    # it still said what was cited.
+    current_files, _ = load(args.target, scope_globs)
+    queue, verdicts = citation_gate(deduped, current_files)
+    hard_ids = set(verdicts)
 
     # --- JUDGE QUEUE ---
     queue.sort(key=lambda c: (-c.get("votes", 1), SEV_RANK[c["severity"]], -c.get("confidence", 0.5)))
@@ -151,7 +203,10 @@ async def scan(args) -> int:
     # --- JUDGE ---
     judge1 = await asyncio.gather(
         *(
-            judge(router, kb, "judge", c, contexts[c["id"]], pmap=map_text, known=known_text, killed=killed_text)
+            judge(
+                router, kb, "judge", c, contexts[c["id"]], pmap=map_text, known=known_text,
+                killed=killed_text, cache_salt=_cited_salt(c),
+            )
             for c in queue
         )
     )
@@ -164,7 +219,10 @@ async def scan(args) -> int:
     if not args.no_judge2 and router.has("judge2") and keeps:
         judge2 = await asyncio.gather(
             *(
-                judge(router, kb, "judge2", c, contexts[c["id"]], pmap=map_text, known=known_text, killed=killed_text)
+                judge(
+                    router, kb, "judge2", c, contexts[c["id"]], pmap=map_text, known=known_text,
+                    killed=killed_text, cache_salt=_cited_salt(c),
+                )
                 for c in keeps
             )
         )
@@ -183,7 +241,9 @@ async def scan(args) -> int:
     pocs_dir = run_dir / "pocs"
     pocs_dir.mkdir(parents=True, exist_ok=True)
 
-    poc_targets = [c for c in deduped if verdicts[c["id"]].verdict != "kill"]
+    # PoC spend goes only to candidates the judge did not kill, in both modes: generating a
+    # PoC is a cost decision, not the removal of evidence.
+    poc_targets = [c for c in deduped if verdicts[c["id"]].verdict != "kill" and c["id"] not in hard_ids]
     poc_frameworks = ["Foundry (Solidity)" if ".sol" in c["location"] else "LiteSVM (Rust)" for c in poc_targets]
     poc_code_ctx = [
         contexts.get(c["id"]) or judge_context(c["location"], files, args.judge_budget) for c in poc_targets
@@ -207,80 +267,117 @@ async def scan(args) -> int:
     for c in deduped:
         entry = dict(c)
         entry["verdict"] = verdicts[c["id"]].model_dump()
+        entry["hard_kill"] = c["id"] in hard_ids
         if c["id"] in poc_paths:
             entry["poc_path"] = str(poc_paths[c["id"]])
         findings_out.append(entry)
-    (run_dir / "findings.json").write_text(json.dumps(findings_out, indent=2, sort_keys=True))
+    write_findings(run_dir, judge_mode, _cited_provenance(provenance_all, deduped), findings_out)
 
-    (run_dir / "report.md").write_text(_render_report(args.target, deduped, verdicts, files))
+    (run_dir / "report.md").write_text(_render_report(args.target, deduped, verdicts, files, judge_mode, hard_ids))
 
+    counts = {v: sum(1 for c in deduped if c["id"] not in hard_ids and verdicts[c["id"]].verdict == v)
+              for v in ("keep", "kill", "needs_poc")}
+    print(
+        f"judge verdicts ({judge_mode}): keep={counts['keep']} kill={counts['kill']} "
+        f"needs_poc={counts['needs_poc']} | removed by deterministic gates: {len(hard_ids)}"
+    )
     print(f"wrote {run_dir}")
     print(json.dumps(router.report(), indent=2))
     return 0
 
 
-def _render_report(target, deduped, verdicts, files) -> str:
+def _detail_section(c: dict, v: Verdict, files, judge_label: str) -> list:
+    lines = [
+        f"## {c['id']} — {c['title']}",
+        "",
+        f"- {judge_label}: {v.verdict}",
+        f"- Severity: {_severity_for_report(c, v)} (hunter said {c['severity']})",
+        f"- Bug class: {c.get('bug_class', '')}",
+        f"- Location: {c['location']}",
+        f"- Votes: {c.get('votes', 1)} (lenses: {', '.join(c.get('lenses', []))})",
+        "",
+        f"Root cause: {c['root_cause']}",
+        "",
+        f"Impact: {c['impact']}",
+        "",
+        "Exploit steps:",
+    ]
+    for i, step in enumerate(c.get("exploit_steps", []), start=1):
+        lines.append(f"{i}. {step}")
+    lines += ["", f"Falsify by: {c.get('falsification', '')}", "", f"Judge: {v.verdict} — {v.reason}", ""]
+    snippet = snippets(c["location"], files, pad=3)
+    if snippet:
+        lines += ["```", snippet, "```"]
+    lines.append("")
+    return lines
+
+
+def _render_report(target, deduped, verdicts, files, judge_mode="advisory", hard_ids=frozenset()) -> str:
+    advisory = judge_mode == "advisory"
     lines = [
         f"# hound scan report: {target}",
         "",
         "> Machine output. UNVERIFIED until I read the cited lines and run the PoC.",
         "",
-        "| id | verdict | severity | votes | lenses | title | location |",
+    ]
+    if advisory:
+        lines += [
+            "> Judge mode: **advisory**. The judge annotates every candidate; nothing it says removes "
+            "one. Only the deterministic gates (citation, stale-citation) remove candidates.",
+            "",
+        ]
+    else:
+        lines += ["> Judge mode: **gate**. Candidates the judge killed are listed at the bottom.", ""]
+
+    live = [c for c in deduped if c["id"] not in hard_ids]
+    gated = [c for c in deduped if c["id"] in hard_ids]
+
+    if advisory:
+        # I triage: most independently-corroborated first, then by severity.
+        ordered = sorted(live, key=lambda c: (-c.get("votes", 1), SEV_RANK[_severity_for_report(c, verdicts[c["id"]])], c["id"]))
+        head, judge_label = "judge", "Judge opinion"
+    else:
+        ordered = sorted(
+            live,
+            key=lambda c: (
+                _VERDICT_ORDER[verdicts[c["id"]].verdict],
+                SEV_RANK[_severity_for_report(c, verdicts[c["id"]])],
+                -c.get("votes", 1),
+            ),
+        )
+        head, judge_label = "verdict", "Verdict"
+
+    lines += [
+        f"| id | {head} | severity | votes | lenses | title | location |",
         "|---|---|---|---|---|---|---|",
     ]
-
-    def sort_key(c):
-        v = verdicts[c["id"]]
-        return (_VERDICT_ORDER[v.verdict], SEV_RANK[_severity_for_report(c, v)], -c.get("votes", 1))
-
-    ordered = sorted(deduped, key=sort_key)
-
     for c in ordered:
         v = verdicts[c["id"]]
         lines.append(
             f"| {c['id']} | {v.verdict} | {_severity_for_report(c, v)} | {c.get('votes', 1)} | "
             f"{', '.join(c.get('lenses', []))} | {c['title']} | {c['location']} |"
         )
-
     lines.append("")
+
     for c in ordered:
         v = verdicts[c["id"]]
-        if v.verdict == "kill":
+        if not advisory and v.verdict == "kill":
             continue
-        lines.append(f"## {c['id']} — {c['title']}")
-        lines.append("")
-        lines.append(f"- Verdict: {v.verdict}")
-        lines.append(f"- Severity: {_severity_for_report(c, v)} (hunter said {c['severity']})")
-        lines.append(f"- Bug class: {c.get('bug_class', '')}")
-        lines.append(f"- Location: {c['location']}")
-        lines.append(f"- Votes: {c.get('votes', 1)} (lenses: {', '.join(c.get('lenses', []))})")
-        lines.append("")
-        lines.append(f"Root cause: {c['root_cause']}")
-        lines.append("")
-        lines.append(f"Impact: {c['impact']}")
-        lines.append("")
-        lines.append("Exploit steps:")
-        for i, step in enumerate(c.get("exploit_steps", []), start=1):
-            lines.append(f"{i}. {step}")
-        lines.append("")
-        lines.append(f"Falsify by: {c.get('falsification', '')}")
-        lines.append("")
-        lines.append(f"Judge: {v.verdict} — {v.reason}")
-        lines.append("")
+        lines += _detail_section(c, v, files, judge_label)
 
-        snippet = snippets(c["location"], files, pad=3)
-        if snippet:
-            lines.append("```")
-            lines.append(snippet)
-            lines.append("```")
-        lines.append("")
+    if not advisory:
+        judge_killed = [c for c in ordered if verdicts[c["id"]].verdict == "kill"]
+        if judge_killed:
+            lines += ["## Killed by the judge", ""]
+            for c in judge_killed:
+                v = verdicts[c["id"]]
+                lines.append(f"- {c['id']}: killed_by={v.killed_by or 'unspecified'} — {v.reason}")
+            lines.append("")
 
-    killed = [c for c in ordered if verdicts[c["id"]].verdict == "kill"]
-    if killed:
-        lines.append("## Killed")
-        lines.append("")
-        for c in killed:
+    if gated:
+        lines += ["## Removed by deterministic gates", ""]
+        for c in gated:
             v = verdicts[c["id"]]
-            lines.append(f"- {c['id']}: killed_by={v.killed_by or 'unspecified'} — {v.reason}")
+            lines.append(f"- {c['id']} ({c['title']}): killed_by={v.killed_by} — {v.reason}")
 
     return "\n".join(lines)
