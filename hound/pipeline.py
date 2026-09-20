@@ -159,6 +159,8 @@ async def scan(args) -> int:
         verdicts[c["id"]] = verdict
 
     keeps = [c for c in queue if verdicts[c["id"]].verdict == "keep"]
+    if not args.no_judge2 and not router.has("judge2") and keeps:
+        print(f"judge2: no target configured — {len(keeps)} keeps are single-judge, no dissent signal")
     if not args.no_judge2 and router.has("judge2") and keeps:
         judge2 = await asyncio.gather(
             *(

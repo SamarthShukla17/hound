@@ -113,3 +113,14 @@ def test_first_usable_target_skips_x402_unless_paid(tmp_path):
         found = _first_usable_target(router, targets, paid=True)
         assert found is not None
         assert found[0]["provider"] == "x402gw"
+
+
+def test_check_skips_a_role_with_no_targets_without_failing(tmp_path, capsys):
+    models_path = tmp_path / "models.yaml"
+    models_path.write_text(
+        "providers:\n  p: {base_url: 'http://127.0.0.1:1/v1', key_env: null, rpm: 60, concurrency: 1, timeout: 1}\n"
+        "roles:\n  judge2: []\nprices: {}\n"
+    )
+    exit_code = asyncio.run(check(_check_args(models=str(models_path))))
+    assert "judge2: no targets configured — skipped" in capsys.readouterr().out
+    assert exit_code == 0

@@ -58,7 +58,7 @@ async def score(args) -> int:
     )
 
     router = Router(models_path=args.models, local_only=args.local_only)
-    data = await router.chat_json("scorer", SYSTEM_PROMPT, user_prompt, temperature=0.0, max_tokens=4000)
+    data = await router.chat_json("scorer", SYSTEM_PROMPT, user_prompt, temperature=0.0)
 
     scores = data.get("scores", []) if isinstance(data, dict) else []
     off_catalog = data.get("off_catalog", []) if isinstance(data, dict) else []

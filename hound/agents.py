@@ -74,7 +74,7 @@ async def mapper(r, kb, code: str, notes: str = "") -> dict:
     user = _user_prompt(code, notes_block, task)
 
     try:
-        data = await r.chat_json("mapper", sys_prompt, user, temperature=0.1, max_tokens=3000)
+        data = await r.chat_json("mapper", sys_prompt, user, temperature=0.1)
     except Exception as exc:  # noqa: BLE001 - a scan continues without a map, just less well
         print(f"[agents] mapper failed: {exc}")
         return {}
@@ -113,7 +113,7 @@ async def hunter(r, kb, lens, code: str, pmap=None, known: str = "", killed: str
     user = _user_prompt(code, map_block, known_block, killed_block, already_block, lens_block, task)
 
     try:
-        data = await r.chat_json("hunter", sys_prompt, user, temperature=temp, max_tokens=2000)
+        data = await r.chat_json("hunter", sys_prompt, user, temperature=temp)
     except Exception as exc:  # noqa: BLE001
         print(f"[agents] hunter ({lens.id}) failed: {exc}")
         return []
@@ -169,7 +169,7 @@ async def judge(r, kb, role: str, cand: dict, code: str, pmap=None, known: str =
     user = _user_prompt(code, map_block, known_block, killed_block, cand_block, task)
 
     try:
-        data = await r.chat_json(role, sys_prompt, user, temperature=0.0, max_tokens=1000)
+        data = await r.chat_json(role, sys_prompt, user, temperature=0.0)
         return Verdict(**data)
     except Exception as exc:  # noqa: BLE001 - never kill a candidate because the judge call failed
         print(f"[agents] judge ({role}) failed: {exc}")
@@ -194,7 +194,7 @@ async def poc(r, kb, cand: dict, code: str, framework: str = "foundry", refs: st
     user = _user_prompt(code, refs_block, cand_block, task)
 
     try:
-        return await r.chat("poc", sys_prompt, user, temperature=0.2, max_tokens=2000)
+        return await r.chat("poc", sys_prompt, user, temperature=0.2)
     except Exception as exc:  # noqa: BLE001
         print(f"[agents] poc failed: {exc}")
         return f"// PoC generation failed: {exc}\n// This is a stub, not a test.\n"

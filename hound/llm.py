@@ -22,6 +22,20 @@ _FENCE_RE = re.compile(r"```(?:json)?", re.IGNORECASE)
 
 TERMINAL_STATUS_CODES = {400, 401, 403, 404}
 
+# Reasoning models burn the completion budget on hidden thinking before emitting any
+# content, so these are large. Override per role via models.yaml's top-level `max_tokens:`
+# map, or per target with a `max_tokens:` key on the target itself.
+DEFAULT_MAX_TOKENS = {
+    "mapper": 8000,
+    "hunter": 12000,
+    "judge": 6000,
+    "judge2": 6000,
+    "poc": 8000,
+    "scorer": 8000,
+}
+FALLBACK_MAX_TOKENS = 2048
+TRUNCATION_RATIO = 0.95
+
 
 def strip_think(text: str) -> str:
     """Remove <think>...</think> blocks some reasoning models prepend."""
@@ -136,6 +150,7 @@ class Router:
         self.budget = budget
 
         self.roles = config["roles"]
+        self.role_max_tokens = {**DEFAULT_MAX_TOKENS, **(config.get("max_tokens") or {})}
         self.prices = {k: tuple(v) for k, v in (config.get("prices") or {}).items()}
         self.providers = {
             name: Provider(name, cfg, budget)
@@ -151,6 +166,7 @@ class Router:
         self.cache_dir = Path(".hound_cache")
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.usage: dict[str, dict[str, int]] = {}
+        self.call_log: list[dict] = []
 
     def targets(self, role: str):
         """Enabled providers for `role`, in fallback order."""
@@ -183,6 +199,14 @@ class Router:
         except RuntimeError:
             return False
 
+    def _resolve_max_tokens(self, role: str, target: dict, explicit) -> int:
+        """explicit argument > the target's own max_tokens > role map > default."""
+        if explicit is not None:
+            return explicit
+        if target.get("max_tokens"):
+            return target["max_tokens"]
+        return self.role_max_tokens.get(role, FALLBACK_MAX_TOKENS)
+
     def _record_usage(self, model: str, response):
         stats = self.usage.setdefault(
             model, {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0}
@@ -193,10 +217,11 @@ class Router:
             stats["prompt_tokens"] += getattr(usage, "prompt_tokens", 0) or 0
             stats["completion_tokens"] += getattr(usage, "completion_tokens", 0) or 0
 
-    async def _call_with_retries(self, provider, model, messages, temperature, max_tokens, extra):
+    async def _call_with_retries(self, provider, model, messages, temperature, max_tokens, extra, role=""):
         cur_temperature = temperature
         retried_without_temperature = False
         last_error = None
+        started = time.monotonic()
 
         for attempt in range(3):
             try:
@@ -244,9 +269,30 @@ class Router:
             else:
                 self._record_usage(model, response)
                 content = response.choices[0].message.content or ""
-                return content, None
+                usage = getattr(response, "usage", None)
+                completion_tokens = getattr(usage, "completion_tokens", 0) or 0
+                finish_reason = getattr(response.choices[0], "finish_reason", None)
+                meta = {
+                    "completion_tokens": completion_tokens,
+                    "finish_reason": finish_reason,
+                    "truncated": finish_reason == "length"
+                    or completion_tokens >= TRUNCATION_RATIO * max_tokens,
+                }
+                self.call_log.append(
+                    {
+                        "role": role,
+                        "provider": provider.name,
+                        "model": model,
+                        "max_tokens": max_tokens,
+                        "prompt_tokens": getattr(usage, "prompt_tokens", 0) or 0,
+                        "completion_tokens": completion_tokens,
+                        "finish_reason": finish_reason,
+                        "seconds": round(time.monotonic() - started, 1),
+                    }
+                )
+                return content, None, meta
 
-        return None, last_error
+        return None, last_error, None
 
     async def chat(
         self,
@@ -255,7 +301,7 @@ class Router:
         user: str,
         *,
         temperature: float = 0.3,
-        max_tokens: int = 2048,
+        max_tokens: int | None = None,
     ) -> str:
         messages = [
             {"role": "system", "content": system},
@@ -272,8 +318,9 @@ class Router:
             if not self.fresh and path.exists():
                 return path.read_text()
 
-            text, error = await self._call_with_retries(
-                provider, model, messages, temperature, max_tokens, extra
+            resolved_max_tokens = self._resolve_max_tokens(role, target, max_tokens)
+            text, error, meta = await self._call_with_retries(
+                provider, model, messages, temperature, resolved_max_tokens, extra, role
             )
             if error is not None:
                 print(f"[llm] {provider.name}/{model} failed for role {role!r}: {error}")
@@ -282,8 +329,16 @@ class Router:
 
             text = strip_think(text)
             if not text:
-                print(f"[llm] {provider.name}/{model} returned an empty reply for role {role!r}")
-                last_error = RuntimeError("empty reply")
+                if meta and meta["truncated"]:
+                    print(
+                        f"[llm] TRUNCATED BY max_tokens: {model}, raise max_tokens for role {role} "
+                        f"(used {meta['completion_tokens']}/{resolved_max_tokens}, "
+                        f"finish_reason={meta['finish_reason']})"
+                    )
+                    last_error = RuntimeError("truncated by max_tokens")
+                else:
+                    print(f"[llm] {provider.name}/{model} returned an empty reply for role {role!r}")
+                    last_error = RuntimeError("empty reply")
                 continue
 
             path.write_text(text)
@@ -298,7 +353,7 @@ class Router:
         user: str,
         *,
         temperature: float = 0.3,
-        max_tokens: int = 2048,
+        max_tokens: int | None = None,
     ) -> dict:
         text = await self.chat(role, system, user, temperature=temperature, max_tokens=max_tokens)
         data = extract_json(text)
@@ -327,7 +382,7 @@ class Router:
             total_usd += cost
             models.append({**{"model": model}, **stats, "cost_usd": cost})
 
-        result = {"models": models, "total_usd": total_usd}
+        result = {"models": models, "total_usd": total_usd, "calls": self.call_log}
         if self.budget is not None:
             result["x402_month_to_date_usd"] = self.budget.spent()
         return result
@@ -376,6 +431,9 @@ async def check(args) -> int:
 
     all_ok = True
     for role, targets in router.roles.items():
+        if not targets:
+            print(f"{role}: no targets configured — skipped")
+            continue
         found = _first_usable_target(router, targets, paid)
         if found is None:
             print(f"{role}: no usable target ({_missing_key_hint(router, targets)})")

@@ -57,36 +57,53 @@ providers:
     concurrency: 2
     timeout: 120
 
+# Completion-token budget per role. Reasoning models (glm-4.7-flash, openrouter/free) burn
+# this on hidden thinking before emitting any content, so it is large; an empty reply with
+# usage at the cap logs "TRUNCATED BY max_tokens" naming the role to raise. These are also
+# the code defaults (llm.DEFAULT_MAX_TOKENS); a target may override with its own max_tokens.
+max_tokens:
+  mapper: 8000
+  hunter: 12000
+  judge: 6000
+  judge2: 6000
+  poc: 8000
+  scorer: 8000
+
+# Reasoning is switched off where the provider supports it, via `extra` (passed straight to
+# the SDK call):
+#   openrouter: extra_body.reasoning.enabled=false            (confirmed working)
+#   zai:        extra_body.thinking.type=disabled             (confirmed working 2026-09-20: a one-word ping
+#                                                              dropped from 166 completion tokens to 2)
 roles:
-  # openrouter/free routes to a random free model, so it's only ever a fallback (or judge2,
-  # where a different provider from the judge is the point).
+  # openrouter/free routes to a random free model — it can even be a safety classifier — so
+  # it is only ever a last-resort fallback, never a judge.
   mapper:
-    - {provider: zai, model: glm-4.7-flash}
-    - {provider: openrouter, model: openrouter/free}
+    - {provider: zai, model: glm-4.7-flash, extra: {extra_body: {thinking: {type: disabled}}}}
+    - {provider: openrouter, model: openrouter/free, extra: {extra_body: {reasoning: {enabled: false}}}}
 
   hunter:
-    - {provider: zai, model: glm-4.7-flash}
-    - {provider: openrouter, model: openrouter/free}
+    - {provider: zai, model: glm-4.7-flash, extra: {extra_body: {thinking: {type: disabled}}}}
+    - {provider: openrouter, model: openrouter/free, extra: {extra_body: {reasoning: {enabled: false}}}}
 
   # Temperature is already 0 for judge calls (see agents.judge).
   judge:
-    - {provider: zai, model: glm-4.7-flash}
-    - {provider: openrouter, model: openrouter/free}
+    - {provider: zai, model: glm-4.7-flash, extra: {extra_body: {thinking: {type: disabled}}}}
+    - {provider: openrouter, model: openrouter/free, extra: {extra_body: {reasoning: {enabled: false}}}}
     # PAID, re-enable later:
     # - {provider: openrouter, model: z-ai/glm-5.3-flash}
     # - {provider: openai, model: gpt-5.6-luna, extra: {reasoning_effort: high}}
 
-  # A different provider than the judge's primary, for an independent second opinion.
-  judge2:
-    - {provider: openrouter, model: openrouter/free}
-    # PAID, re-enable later:
+  # NO TARGET on purpose: a random free model is not a second opinion. With judge2 empty the
+  # pipeline skips it, so a run is single-judge and there is NO DISSENT SIGNAL until a real
+  # second model is configured. Re-enable once the xAI key exists:
+  judge2: []
     # - {provider: xai, model: grok-4.6}
 
   poc:
-    - {provider: zai, model: glm-4.7-flash}
+    - {provider: zai, model: glm-4.7-flash, extra: {extra_body: {thinking: {type: disabled}}}}
 
   scorer:
-    - {provider: zai, model: glm-4.7-flash}
+    - {provider: zai, model: glm-4.7-flash, extra: {extra_body: {thinking: {type: disabled}}}}
     # PAID, re-enable later:
     # - {provider: openrouter, model: z-ai/glm-5.3-flash}
 

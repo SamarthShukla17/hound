@@ -182,3 +182,88 @@ def test_404_prints_model_not_found_warning(models_yaml, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "MODEL NOT FOUND: enabled_provider/enabled-model" in out
     assert "check the model id in models.yaml" in out
+
+
+def _resp(content, completion_tokens, finish_reason="stop"):
+    return SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content=content), finish_reason=finish_reason)],
+        usage=SimpleNamespace(prompt_tokens=10, completion_tokens=completion_tokens),
+    )
+
+
+def test_max_tokens_precedence_target_over_role_map_over_default(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("TEST_KEY_PRESENT", "secret")
+    path = tmp_path / "models.yaml"
+    path.write_text(
+        textwrap.dedent(
+            """
+            providers:
+              p: {base_url: "http://example.invalid/v1", key_env: TEST_KEY_PRESENT, rpm: 6000, concurrency: 2, timeout: 5}
+            max_tokens: {mapped_role: 777}
+            roles:
+              hunter: [{provider: p, model: m}]
+              mapped_role: [{provider: p, model: m}]
+              targeted_role: [{provider: p, model: m, max_tokens: 4321}]
+              unknown_role: [{provider: p, model: m}]
+            """
+        )
+    )
+    router = Router(models_path=str(path), fresh=True)
+    sent = {}
+
+    async def fake_complete(self, *, model, messages, temperature, max_tokens, extra=None):
+        sent["max_tokens"] = max_tokens
+        return _resp("ok", 5)
+
+    monkeypatch.setattr(Provider, "complete", fake_complete)
+
+    for role, expected in [("hunter", 12000), ("mapped_role", 777), ("targeted_role", 4321), ("unknown_role", 2048)]:
+        asyncio.run(router.chat(role, "s", f"u-{role}"))
+        assert sent["max_tokens"] == expected, role
+
+    asyncio.run(router.chat("hunter", "s", "explicit", max_tokens=9))
+    assert sent["max_tokens"] == 9
+
+
+def test_empty_reply_at_the_token_cap_is_reported_as_truncation(models_yaml, monkeypatch, capsys):
+    router = Router(models_path=str(models_yaml), fresh=True)
+
+    async def fake_complete(self, *, model, messages, temperature, max_tokens, extra=None):
+        return _resp("", completion_tokens=max_tokens, finish_reason="length")
+
+    monkeypatch.setattr(Provider, "complete", fake_complete)
+    with pytest.raises(RuntimeError):
+        asyncio.run(router.chat("test_role", "s", "u", max_tokens=100))
+
+    out = capsys.readouterr().out
+    assert "TRUNCATED BY max_tokens: enabled-model, raise max_tokens for role test_role" in out
+    assert "returned an empty reply" not in out
+
+
+def test_empty_reply_well_under_the_cap_is_a_plain_empty_reply(models_yaml, monkeypatch, capsys):
+    router = Router(models_path=str(models_yaml), fresh=True)
+
+    async def fake_complete(self, *, model, messages, temperature, max_tokens, extra=None):
+        return _resp("", completion_tokens=3, finish_reason="stop")
+
+    monkeypatch.setattr(Provider, "complete", fake_complete)
+    with pytest.raises(RuntimeError):
+        asyncio.run(router.chat("test_role", "s", "u", max_tokens=100))
+
+    out = capsys.readouterr().out
+    assert "returned an empty reply" in out
+    assert "TRUNCATED" not in out
+
+
+def test_report_includes_per_call_token_detail(models_yaml, monkeypatch):
+    router = Router(models_path=str(models_yaml), fresh=True)
+
+    async def fake_complete(self, *, model, messages, temperature, max_tokens, extra=None):
+        return _resp("hello", completion_tokens=42)
+
+    monkeypatch.setattr(Provider, "complete", fake_complete)
+    asyncio.run(router.chat("test_role", "s", "u"))
+
+    call = router.report()["calls"][0]
+    assert call["role"] == "test_role" and call["completion_tokens"] == 42 and call["max_tokens"] == 2048
