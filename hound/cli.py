@@ -151,6 +151,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     check = sub.add_parser("check", help="ping each role's first fallback target")
     check.add_argument("--paid", action="store_true", help="also probe x402 providers (spends real money)")
+    check.add_argument("--strict", action="store_true",
+                       help="require every role to resolve to its FIRST configured target; exit non-zero if any would fall back")
     check.set_defaults(handler=_cmd_check)
 
     coach = sub.add_parser("coach", help="ask guided questions about a target, no verdicts")

@@ -508,6 +508,10 @@ async def check(args) -> int:
     """
     router = Router(models_path=args.models, local_only=args.local_only, fresh=True)
     paid = getattr(args, "paid", False)
+    # strict: every role must resolve to its FIRST configured target. A role that would fall
+    # back mid-run produces a run hunted/judged on a different model than the one named, which
+    # is not comparable with the runs beside it.
+    strict = getattr(args, "strict", False)
 
     all_ok = True
     for role, targets in router.roles.items():
@@ -522,6 +526,11 @@ async def check(args) -> int:
 
         target, provider = found
         label = f"{target['provider']}/{target['model']}"
+        if strict and target is not targets[0]:
+            primary = f"{targets[0]['provider']}/{targets[0]['model']}"
+            print(f"{role}: STRICT FAIL — configured primary {primary} is unusable; would fall back to {label}")
+            all_ok = False
+            continue
         try:
             response = await provider.complete(
                 model=target["model"],
@@ -537,6 +546,9 @@ async def check(args) -> int:
             )
             reply = strip_think(response.choices[0].message.content or "")
             print(f"{role}: {label}: {reply[:40]!r}")
+        except OutOfCredits as exc:
+            print(f"{role}: {label}: OUT OF CREDITS: {str(exc)[:80]}")
+            return 2
         except Exception as exc:  # noqa: BLE001 - report and keep checking other roles
             print(f"{role}: {label}: FAILED: {str(exc)[:40]}")
             all_ok = False
