@@ -79,30 +79,20 @@ max_tokens:
 #   zai:        extra_body.thinking.type=disabled             (confirmed working 2026-09-20: a one-word ping
 #                                                              dropped from 166 completion tokens to 2)
 roles:
-  # FREE HUNT-SIDE MODELS ARE PINNED BY NAME. "openrouter/free" was removed on 2026-09-20: it
-  # routes to a RANDOM free model, so seeds are not replicates (one bench seed hunted 10 of 15
-  # calls on unknown models, another 12 of 14 on zai — the runs were not comparable).
-  # cohere/north-mini-code:free chosen from the 21 :free ids listed that day: code-specialised,
-  # 256k context, answered 3/3 with gate-passable path:line citations, ~2s with reasoning off.
-  # Rejected: qwen/qwen3.8-27b:free and z-ai/glm-5.2:free (both 429 rate-limited upstream when
-  # probed), nvidia/nemotron-3-nano-omni-...:free (works, 3-13s, slower).
-  # SINGLE TARGET, NO FALLBACK, on purpose. The map feeds every hunter prompt and the hunters
-  # produce the candidates recall is measured on, so a mid-run fallback would silently mix
-  # models and make seeds non-replicates (measured 2026-09-20: one seed hunted 10/15 calls on
-  # unknown models, another 12/14 on zai; the two runs were not comparable). With no fallback a
-  # provider failure instead yields an EMPTY lens, which the scan logs loudly — a recall hole
-  # that is visible beats a silent model swap. zai glm-4.7-flash was demoted after it timed out
-  # on a real bench lens (147s, 0 findings) while 429-storming.
-  # PINNED-GLM-HUNTER (2026-09-20). cohere/north-mini-code:free was measured as the sole
-  # hunter across 3 seeds and collapsed: 4, 7 and 0 raw candidates (one seed produced NOTHING
-  # from all 14 lenses, no errors), 2.2% union recall vs the ~22% baseline. glm-4.7-flash
-  # previously produced 34-46 raw. It 429s and is slow, but a lens that fails loudly is
-  # recoverable and a model that finds nothing is not.
+  # PINNED to openrouter z-ai/glm-5.3-flash, SOLE target, no fallback (2026-09-21).
+  # History, all measured: "openrouter/free" routed to a random model per call so seeds were
+  # not replicates; cohere/north-mini-code:free collapsed as a hunter (4/7/0 raw candidates,
+  # one seed found nothing from all 14 lenses); zai glm-4.7-flash produced 36 raw but 429s
+  # constantly (code 1305) and finally blocked an entire chain at preflight. Same GLM family
+  # as 4.7-flash, paid and reliable, ~$0.08 per 3 seeds.
+  # Mandatory reasoning on this endpoint, so no reasoning-off extra (it 400s) and thinking
+  # counts against max_tokens.
+  # CAVEAT: this is also the judge model, so hunter and judge are not independent here.
   mapper:
-    - {provider: zai, model: glm-4.7-flash, extra: {extra_body: {thinking: {type: disabled}}}}
+    - {provider: openrouter, model: z-ai/glm-5.3-flash}
 
   hunter:
-    - {provider: zai, model: glm-4.7-flash, extra: {extra_body: {thinking: {type: disabled}}}}
+    - {provider: openrouter, model: z-ai/glm-5.3-flash}
 
   # Temperature is already 0 for judge calls (see agents.judge). PAID primary, free fallback.
   # z-ai/glm-5.3-flash has MANDATORY reasoning (a reasoning-off extra 400s: "Reasoning is
