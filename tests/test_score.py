@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import json
+import re
 import textwrap
 
 import pytest
@@ -37,6 +38,16 @@ def _score_args(**overrides) -> argparse.Namespace:
     return argparse.Namespace(**defaults)
 
 
+GROUND_TRUTH = """# Ground truth
+
+### H-01 - First bug
+The vault mis-handles something.
+
+### M-01 - Second bug
+A different thing is wrong.
+"""
+
+
 def _finding(fid, title, verdict):
     return {"id": fid, "title": title, "severity": "high", "location": f"V.sol:{fid[-1]}",
             "root_cause": f"rc {fid}", "impact": f"i {fid}", "verdict": {"verdict": verdict}}
@@ -50,7 +61,7 @@ def run_dir(tmp_path):
     findings.append(_finding("F006", "killed bug", "kill"))
     (tmp_path / "findings.json").write_text(json.dumps(findings))
     truth_path = tmp_path / "truth.md"
-    truth_path.write_text("# Ground truth\n\n## GT1\nSome bug.\n")
+    truth_path.write_text(GROUND_TRUTH)
     return tmp_path, truth_path
 
 
@@ -68,8 +79,9 @@ def test_score_computes_weighted_recall_correctly(run_dir, tmp_path, monkeypatch
         assert exit_code == 0
 
     result = json.loads((out_dir / "score.json").read_text())
-    assert result["counts"] == {"EXACT": 3, "PARTIAL": 2, "MISS": 5}
-    assert result["weighted_recall_pct"] == pytest.approx(40.0)
+    # the fixture key has 2 bugs; the mock matches H-01 and misses M-01
+    assert result["counts"] == {"EXACT": 1, "PARTIAL": 0, "MISS": 1}
+    assert result["weighted_recall_pct"] == pytest.approx(50.0)
 
 
 def test_score_default_excludes_killed_findings(run_dir, tmp_path, monkeypatch):
@@ -122,19 +134,25 @@ def test_score_prompt_demands_full_coverage_and_valid_finding_ids(run_dir, tmp_p
         asyncio.run(score(_score_args(run_dir=str(out_dir), truth=str(truth_path), models=str(models_path))))
         system = mock.requests[-1]["messages"][0]["content"]
 
-    assert "EVERY candidate finding for EVERY ground-truth bug" in system
-    assert "exactly one of the ids in the CANDIDATE FINDINGS list, or null" in system
+    flat = " ".join(system.split())
+    assert "ONE bug from a ground-truth" in flat          # per-bug, not all-at-once
+    assert "Consider EVERY candidate. Do not stop at the first plausible one." in flat
+    assert "must be exactly one of the ids in CANDIDATE FINDINGS, or null" in flat
 
 
 # --- unit tests with a fake router ------------------------------------------
 
 
 class FakeScorerRouter:
-    """Stands in for hound.score.Router; behaviour set per test via class attributes."""
+    """Stands in for hound.score.Router. The scorer makes ONE call per ground-truth bug, so
+    `per_bug` maps a gt_id to the reply for that bug; `sequence` (if set) is popped per call
+    regardless of bug, for testing retries and aborts."""
 
-    responses = []
+    sequence = []
     calls = 0
-    answered_by = "z-ai/glm-5.3-flash"  # which model "answered"; tests override to force a fallback
+    answered_by = "z-ai/glm-5.3-flash"
+    per_bug = {}
+    seen = []
 
     def __init__(self, models_path=None, local_only=False):
         self.roles = {"scorer": [{"provider": "openrouter", "model": "z-ai/glm-5.3-flash"},
@@ -144,19 +162,26 @@ class FakeScorerRouter:
     def report(self):
         return {"models": [], "total_usd": 0.0, "calls": list(self.call_log)}
 
-    async def chat_json(self, role, system, user, *, temperature=0.3, max_tokens=None, ceiling=None):
+    async def chat_json(self, role, system, user, *, temperature=0.3, max_tokens=None,
+                        ceiling=None, cache_salt=""):
         type(self).calls += 1
         self.call_log.append({"role": role, "model": type(self).answered_by})
-        item = type(self).responses.pop(0)
-        if isinstance(item, Exception):
-            raise item
-        return item
+        type(self).seen.append({"system": system, "user": user, "salt": cache_salt, "ceiling": ceiling})
+        if type(self).sequence:
+            item = type(self).sequence.pop(0)
+            if isinstance(item, Exception):
+                raise item
+            return item
+        m = re.search(r"GROUND-TRUTH BUG ([HM]-\d+)", user)
+        gid = m.group(1) if m else ""
+        return type(self).per_bug.get(gid, {"verdict": "MISS", "finding_id": None, "why": "no match"})
 
 
 @pytest.fixture
 def fake_router(monkeypatch):
-    FakeScorerRouter.responses, FakeScorerRouter.calls = [], 0
+    FakeScorerRouter.sequence, FakeScorerRouter.calls = [], 0
     FakeScorerRouter.answered_by = "z-ai/glm-5.3-flash"
+    FakeScorerRouter.per_bug, FakeScorerRouter.seen = {}, []
     monkeypatch.setattr("hound.score.Router", FakeScorerRouter)
     slept = []
 
@@ -174,76 +199,126 @@ def _run(run_dir, **overrides):
     return asyncio.run(score(args))
 
 
-def _scores(rows):
-    return {"scores": [{"gt_id": f"GT{i}", "verdict": v, "finding_id": fid, "why": why}
-                       for i, (v, fid, why) in enumerate(rows, 1)], "off_catalog": []}
+def test_one_call_per_ground_truth_bug_per_repeat(run_dir, fake_router):
+    """23 bugs x 3 repeats was the whole point: a per-bug call has a far smaller reasoning
+    surface than grading every bug in one call."""
+    assert _run(run_dir, repeats=3) == 0
+    assert fake_router.calls == 2 * 3  # the fixture truth has 2 bugs
+    asked = {re.search(r"GROUND-TRUTH BUG ([HM]-\d+)", c["user"]).group(1) for c in fake_router.seen}
+    assert asked == {"H-01", "M-01"}
 
 
-def test_hallucinated_finding_id_is_downgraded_to_a_miss(run_dir, fake_router, capsys):
-    fake_router.responses = [_scores([
-        ("EXACT", "F001", "matches F001"),
-        ("EXACT", "F099", "matches F099"),          # not a supplied id
-        ("PARTIAL", None, "partial but no finding"),  # match without a finding
-        ("MISS", "null", "nothing"),                  # the string "null" means no finding
-    ])]
-    assert _run(run_dir) == 0
+def test_each_repeat_uses_a_distinct_cache_salt_so_it_actually_re_samples(run_dir, fake_router):
+    """Without a distinct salt every repeat is one cache hit, and the 'majority' is a single
+    opinion counted three times."""
+    _run(run_dir, repeats=3)
+    salts = [c["salt"] for c in fake_router.seen if "H-01" in c["user"]]
+    assert len(set(salts)) == 3
+
+
+def test_the_majority_verdict_wins(run_dir, fake_router, monkeypatch):
+    calls = {"n": 0}
+
+    async def two_exact_one_miss(self, role, system, user, **kw):
+        type(self).calls += 1
+        self.call_log.append({"role": role, "model": type(self).answered_by})
+        if "H-01" not in user:
+            return {"verdict": "MISS", "finding_id": None, "why": "w"}
+        calls["n"] += 1
+        return ({"verdict": "EXACT", "finding_id": "F001", "why": "w"} if calls["n"] <= 2
+                else {"verdict": "MISS", "finding_id": None, "why": "w"})
+
+    monkeypatch.setattr(FakeScorerRouter, "chat_json", two_exact_one_miss)
+    assert _run(run_dir, repeats=3) == 0
 
     result = json.loads((run_dir[0] / "score.json").read_text())
-    assert result["counts"] == {"EXACT": 1, "PARTIAL": 0, "MISS": 3}
-    assert [s["finding_id"] for s in result["scores"]] == ["F001", None, None, None]
-    out = capsys.readouterr().out
-    assert "F099" in out and "not one of the supplied findings" in out
+    h01 = next(s for s in result["scores"] if s["gt_id"] == "H-01")
+    assert h01["verdict"] == "EXACT" and h01["agreement"] == "2/3"
+    assert result["agreement"]["H-01"] == "2/3"
 
 
-def test_pass_1_style_boilerplate_triggers_the_degeneration_warning(run_dir, fake_router, capsys):
-    boiler = "F001 describes a WhitelistDeployer issue (arbitrary owner assignment) which is unrelated to bug {}."
-    fake_router.responses = [_scores([("MISS", None, boiler.format(i)) for i in range(23)])]
+def test_agreement_is_recorded_per_bug(run_dir, fake_router):
+    fake_router.per_bug = {"H-01": {"verdict": "EXACT", "finding_id": "F001", "why": "w"}}
+    assert _run(run_dir, repeats=3) == 0
+    result = json.loads((run_dir[0] / "score.json").read_text())
+    assert result["agreement"] == {"H-01": "3/3", "M-01": "3/3"}
+    assert result["unanimous_bugs"] == 2
+    assert result["repeats"] == 3
+
+
+def test_a_hallucinated_finding_id_is_downgraded_to_a_miss(run_dir, fake_router, capsys):
+    fake_router.per_bug = {"H-01": {"verdict": "EXACT", "finding_id": "F099", "why": "w"}}
     assert _run(run_dir) == 0
+    result = json.loads((run_dir[0] / "score.json").read_text())
+    h01 = next(s for s in result["scores"] if s["gt_id"] == "H-01")
+    assert h01["verdict"] == "MISS" and h01["finding_id"] is None
+    assert "not one of the supplied findings" in capsys.readouterr().out
 
-    assert "scorer likely degenerated" in capsys.readouterr().out
-    assert json.loads((run_dir[0] / "score.json").read_text())["degenerate_warning"] is True
 
-
-def test_generic_reasons_about_the_whole_range_are_not_flagged(run_dir, fake_router, capsys):
-    rows = [("MISS", None, f"F001-F005 do not identify bug {i}.") for i in range(20)]
-    rows += [("MISS", None, f"F003 is a different issue than bug {i}.") for i in range(3)]
-    fake_router.responses = [_scores(rows)]
+def test_off_catalog_is_derived_not_asked_for(run_dir, fake_router):
+    """Asking a model to list unmatched findings while grading produced boilerplate; a set
+    difference needs no judgement."""
+    fake_router.per_bug = {"H-01": {"verdict": "EXACT", "finding_id": "F001", "why": "w"}}
     assert _run(run_dir) == 0
+    result = json.loads((run_dir[0] / "score.json").read_text())
+    assert "F001" not in [o["finding_id"] for o in result["off_catalog"]]
+    assert "F002" in [o["finding_id"] for o in result["off_catalog"]]
 
-    assert "degenerated" not in capsys.readouterr().out
 
-
-def test_a_429_is_retried_once_after_a_pause(run_dir, fake_router):
-    fake_router.responses = [
-        RuntimeError("all targets failed for role 'scorer': Error code: 429 - overloaded"),
-        _scores([("EXACT", "F001", "matches F001")]),
-    ]
-    assert _run(run_dir) == 0
-    assert fake_router.calls == 2
+def test_a_429_is_retried_once_per_call(run_dir, fake_router):
+    fake_router.sequence = [RuntimeError("Error code: 429 - overloaded"),
+                            {"verdict": "EXACT", "finding_id": "F001", "why": "w"}]
+    assert _run(run_dir, repeats=1) == 0
     assert fake_router.slept == [30]
 
 
-def test_two_429s_fail_gracefully_with_no_traceback_and_no_score_file(run_dir, fake_router, capsys):
-    fake_router.responses = [RuntimeError("Error code: 429 - overloaded")] * 2
-    assert _run(run_dir) == 1
-    assert fake_router.calls == 2
-    assert "score failed:" in capsys.readouterr().out
+def test_a_bug_that_cannot_be_graded_at_all_aborts_instead_of_counting_as_a_miss(run_dir, fake_router, capsys):
+    """An ungraded bug scored MISS understates recall and is indistinguishable from a real
+    miss."""
+    fake_router.sequence = [RuntimeError("boom")] * 20
+    assert _run(run_dir, repeats=1) == 1
+    out = capsys.readouterr().out
+    assert "could not be graded at all" in out
     assert not (run_dir[0] / "score.json").exists()
 
 
-def test_a_non_429_error_is_not_retried(run_dir, fake_router, capsys):
-    fake_router.responses = [RuntimeError("Error code: 402 - insufficient credits")]
-    assert _run(run_dir) == 1
-    assert fake_router.calls == 1
-    assert "insufficient credits" in capsys.readouterr().out
+def test_a_non_429_error_is_not_retried(run_dir, fake_router):
+    fake_router.sequence = [RuntimeError("Error code: 500 - server error"),
+                            {"verdict": "MISS", "finding_id": None, "why": "w"},
+                            {"verdict": "MISS", "finding_id": None, "why": "w"}]
+    _run(run_dir, repeats=1)
+    assert fake_router.slept == []
 
 
 def test_missing_findings_json_fails_gracefully(tmp_path, capsys):
     truth = tmp_path / "truth.md"
-    truth.write_text("x")
+    truth.write_text(GROUND_TRUTH)
     args = _score_args(run_dir=str(tmp_path / "nope"), truth=str(truth), models="unused.yaml")
     assert asyncio.run(score(args)) == 1
     assert "cannot read inputs" in capsys.readouterr().out
+
+
+def test_a_truth_file_with_no_parseable_entries_is_refused(tmp_path, run_dir, fake_router, capsys):
+    out_dir, _ = run_dir
+    bad = tmp_path / "bad_truth.md"
+    bad.write_text("no headings here")
+    args = _score_args(run_dir=str(out_dir), truth=str(bad), models="unused.yaml")
+    assert asyncio.run(score(args)) == 1
+    assert "no '### <id> - <title>' ground-truth entries" in capsys.readouterr().out
+
+
+# --- ground-truth splitting -------------------------------------------------------------------
+
+
+def test_split_ground_truth_keeps_the_full_description_not_the_summary_line():
+    from hound.score import split_ground_truth
+
+    text = ("## High (1)\n### H-01 - Short summary line\n\n"
+            "## Full descriptions\n### H-01 - Short summary line\n"
+            "The long description with all the detail.\n")
+    entries = split_ground_truth(text)
+    assert set(entries) == {"H-01"}
+    assert "long description" in entries["H-01"]
 
 
 # --- which findings a score covers, per judge mode ---------------------------------
@@ -277,7 +352,7 @@ def test_include_killed_scores_literally_everything():
 
 
 def test_a_legacy_run_with_no_hard_kill_flag_is_read_as_gate_mode(run_dir, fake_router, capsys):
-    fake_router.responses = [_scores([("EXACT", "F001", "matches F001")])]
+    fake_router.per_bug = {"H-01": {"verdict": "EXACT", "finding_id": "F001", "why": "w"}}
     assert _run(run_dir) == 0  # run_dir fixture writes the legacy bare-list format
     assert "judge_mode=gate" in capsys.readouterr().out
 
@@ -290,7 +365,7 @@ def _modern_run(tmp_path, provenance):
     doc = {"judge_mode": "advisory", "provenance": provenance, "findings": findings}
     (tmp_path / "findings.json").write_text(json.dumps(doc))
     truth = tmp_path / "truth.md"
-    truth.write_text("gt")
+    truth.write_text(GROUND_TRUTH)
     return tmp_path, truth
 
 
@@ -300,7 +375,7 @@ def test_score_warns_loudly_when_the_working_tree_no_longer_matches_the_run(tmp_
     (target / "V.sol").write_text("contract V {}\n")
     provenance = {"target": str(target), "commit": None, "dirty": None,
                   "files": {"V.sol": {"sha256": "0" * 64, "n_lines": 1}}}  # recorded hash != disk
-    fake_router.responses = [_scores([("MISS", None, "nothing")])]
+    fake_router.per_bug = {}
     assert _run(_modern_run(tmp_path, provenance)) == 0
 
     out = capsys.readouterr().out
@@ -318,13 +393,13 @@ def test_score_is_quiet_when_provenance_matches(tmp_path, fake_router, capsys):
     (target / "V.sol").write_text("contract V {}\n")
     provenance = {"target": str(target), "commit": None, "dirty": None,
                   "files": {"V.sol": {"sha256": file_sha256(target / "V.sol"), "n_lines": 1}}}
-    fake_router.responses = [_scores([("MISS", None, "nothing")])]
+    fake_router.per_bug = {}
     assert _run(_modern_run(tmp_path, provenance)) == 0
     assert "WARNING: run provenance" not in capsys.readouterr().out
 
 
 def test_score_prints_a_cost_line_like_scan(run_dir, fake_router, capsys):
-    fake_router.responses = [_scores([("MISS", None, "nothing")])]
+    fake_router.per_bug = {}
     assert _run(run_dir) == 0
     out = capsys.readouterr().out
     assert '"total_usd"' in out and '"models"' in out
@@ -367,7 +442,7 @@ def test_union_counts_a_bug_found_by_any_seed_at_its_best_verdict(tmp_path):
 def test_a_402_aborts_the_score_with_a_clear_message_and_no_score_file(run_dir, fake_router, capsys):
     from hound.llm import OutOfCredits
 
-    fake_router.responses = [OutOfCredits("openrouter/z-ai/glm-5.3-flash for role 'scorer': 402")]
+    fake_router.sequence = [OutOfCredits("openrouter/z-ai/glm-5.3-flash for role 'scorer': 402")]
     assert _run(run_dir) == 2  # distinct exit code, not the generic failure 1
     out = capsys.readouterr().out
     assert "OUT OF CREDITS — run aborted" in out
@@ -377,14 +452,16 @@ def test_a_402_aborts_the_score_with_a_clear_message_and_no_score_file(run_dir, 
 def test_a_402_is_never_retried_as_if_it_were_a_rate_limit(run_dir, fake_router):
     from hound.llm import OutOfCredits
 
-    fake_router.responses = [OutOfCredits("402"), _scores([("EXACT", "F001", "w")])]
+    fake_router.sequence = [OutOfCredits("402")]
     assert _run(run_dir) == 2
-    assert fake_router.calls == 1  # a 429 would have retried; 402 must not
+    # per-bug calls are dispatched together, so others may already be in flight; what matters
+    # is that the 402 was never retried the way a 429 is
+    assert fake_router.slept == []
 
 
 def test_a_score_graded_by_the_fallback_model_is_refused(run_dir, fake_router, capsys):
     fake_router.answered_by = "glm-4.7-flash"  # fell back off the configured paid scorer
-    fake_router.responses = [_scores([("EXACT", "F001", "matches F001")])]
+    fake_router.per_bug = {"H-01": {"verdict": "EXACT", "finding_id": "F001", "why": "w"}}
 
     assert _run(run_dir) == 2
     out = capsys.readouterr().out
@@ -394,27 +471,24 @@ def test_a_score_graded_by_the_fallback_model_is_refused(run_dir, fake_router, c
 
 
 def test_a_score_on_the_configured_model_is_written_normally(run_dir, fake_router):
-    fake_router.responses = [_scores([("EXACT", "F001", "matches F001")])]
+    fake_router.per_bug = {"H-01": {"verdict": "EXACT", "finding_id": "F001", "why": "w"}}
     assert _run(run_dir) == 0
     assert (run_dir[0] / "score.json").exists()
 
 
-def test_the_scorer_gets_a_generous_call_ceiling(run_dir, fake_router):
+def test_the_scorer_gets_a_generous_call_ceiling(run_dir, fake_router, monkeypatch):
     """One scoring call grades every candidate against every ground-truth bug — the longest
     single call the harness makes. It overran the default 300s ceiling on a real run."""
     from hound.score import SCORER_CALL_CEILING
 
     seen = {}
 
-    async def capture(self, role, system, user, *, temperature=0.3, max_tokens=None, ceiling=None):
+    async def capture(self, role, system, user, *, temperature=0.3, max_tokens=None, ceiling=None, cache_salt=""):
         seen["ceiling"] = ceiling
-        return _scores([("EXACT", "F001", "w")])
+        return {"verdict": "MISS", "finding_id": None, "why": "w"}
 
-    FakeScorerRouter.chat_json = capture
-    try:
-        assert _run(run_dir) == 0
-    finally:
-        del FakeScorerRouter.chat_json
+    monkeypatch.setattr(FakeScorerRouter, "chat_json", capture)
+    assert _run(run_dir) == 0
     assert seen["ceiling"] == SCORER_CALL_CEILING >= 900
 
 

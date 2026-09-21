@@ -90,22 +90,10 @@ FALSIFY_REPLY = {
     "killed_by": "",
 }
 
-# 3 EXACT + 2 PARTIAL + 5 MISS -> weighted recall (3 + 0.5*2) / 10 = 40%.
-SCORE_REPLY = {
-    "scores": [
-        {"gt_id": "GT1", "verdict": "EXACT", "finding_id": "F001", "why": "same root cause, same fix"},
-        {"gt_id": "GT2", "verdict": "EXACT", "finding_id": "F002", "why": "same root cause, same fix"},
-        {"gt_id": "GT3", "verdict": "EXACT", "finding_id": "F003", "why": "same root cause, same fix"},
-        {"gt_id": "GT4", "verdict": "PARTIAL", "finding_id": "F004", "why": "same root cause, narrower fix"},
-        {"gt_id": "GT5", "verdict": "PARTIAL", "finding_id": "F005", "why": "severity off by two levels"},
-        {"gt_id": "GT6", "verdict": "MISS", "finding_id": None, "why": "different root cause"},
-        {"gt_id": "GT7", "verdict": "MISS", "finding_id": None, "why": "different root cause"},
-        {"gt_id": "GT8", "verdict": "MISS", "finding_id": None, "why": "different root cause"},
-        {"gt_id": "GT9", "verdict": "MISS", "finding_id": None, "why": "different root cause"},
-        {"gt_id": "GT10", "verdict": "MISS", "finding_id": None, "why": "different root cause"},
-    ],
-    "off_catalog": [{"finding_id": "F999", "note": "real-looking but outside the answer key"}],
-}
+# The scorer now grades ONE ground-truth bug per call, so the mock answers per bug: a match
+# for H-01, a miss for anything else.
+SCORE_MATCH = {"verdict": "EXACT", "finding_id": "F001", "why": "same root cause, same fix"}
+SCORE_MISS = {"verdict": "MISS", "finding_id": None, "why": "different root cause"}
 
 POC_REPLY = (
     "function test_reentrancy() public {\n"
@@ -150,7 +138,8 @@ class _MockHandler(BaseHTTPRequestHandler):
         elif "TASK: FALSIFY" in user_content:
             content = _wrap(json.dumps(FALSIFY_REPLY), as_json=True)
         elif "TASK: SCORE" in user_content:
-            content = _wrap(json.dumps(SCORE_REPLY), as_json=True)
+            reply = SCORE_MATCH if "GROUND-TRUTH BUG H-01" in user_content else SCORE_MISS
+            content = _wrap(json.dumps(reply), as_json=True)
         else:
             content = _wrap(POC_REPLY, as_json=False)
 

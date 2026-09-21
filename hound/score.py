@@ -11,45 +11,62 @@ from .llm import OutOfCredits, Router
 from .runs import is_hard_kill, read_findings
 
 RETRY_DELAY_SECONDS = 30
-# One scoring call grades EVERY candidate against EVERY ground-truth bug, so it is the longest
-# single call the harness makes: 25 candidates x 23 bugs on a mandatory-reasoning model runs
-# past the default per-call ceiling. Generous on purpose; the run is already finished by here.
+# Per-bug calls are small, but reasoning still runs long; generous since the run is finished.
 SCORER_CALL_CEILING = 900
 DEGENERATE_SHARE = 0.8
 DEGENERATE_MIN_SCORES = 3
+# One call per ground-truth bug, repeated, majority wins. Grading all 23 bugs in a single call
+# was not reproducible: the same three artifacts scored twice swung 8.7 -> 4.3 and 8.7 -> 13.0,
+# a +/-4.4 point swing, larger than most effects being measured. A per-bug call has a far
+# smaller reasoning surface, and repeating it turns residual nondeterminism into a measurable
+# agreement number instead of silent noise.
+SCORE_REPEATS = 3
 
-SYSTEM_PROMPT = """You are grading a smart-contract audit tool against a ground-truth answer key.
+SYSTEM_PROMPT = """You are grading a smart-contract audit tool against ONE bug from a ground-truth
+answer key.
 
-For EACH ground-truth bug, decide whether ANY of the candidate findings names the same
-root-cause defect — the same specific thing wrong in the code, not merely the same file or
-function — and whether that finding's fix would actually eliminate the bug.
+You are given exactly one ground-truth bug and every candidate finding the tool produced. Decide
+whether ANY candidate names the same root-cause defect — the same specific thing wrong in the
+code, not merely the same file or function — and whether that finding's fix would actually
+eliminate the bug.
 
-ALTERNATE CLAIMS: a candidate may carry alternate_claims — other readings of the SAME lines
-(an earlier pass's explanation that a later one replaced, or merged duplicates). Consider the
-primary reading AND every alternate. If ANY of them names the ground-truth defect, that is a
-match: credit the candidate by its id and say in "why" which reading matched.
+Consider EVERY candidate. Do not stop at the first plausible one.
 
-COVERAGE: you must consider EVERY candidate finding for EVERY ground-truth bug. Do not compare a
-bug against only the first finding or the most prominent one. In each "why", name the finding you
-matched, or for a MISS name the closest finding you checked and say how it differs. finding_id must
-be exactly one of the ids in the CANDIDATE FINDINGS list, or null. Never invent an id.
+ALTERNATE CLAIMS: a candidate may carry alternate_claims — other readings of the SAME lines (an
+earlier pass's explanation that a later one replaced, or merged duplicates). Consider the primary
+reading AND every alternate. If ANY of them names the ground-truth defect, that is a match:
+credit the candidate by its id and say in "why" which reading matched.
 
 EXACT   = same root cause AND the fix eliminates it.
 PARTIAL = same root cause but a narrower, different, or missing fix, or severity off by two or
           more levels (critical/high/medium/low).
 MISS    = a different root cause, even if it's one function away from the real bug.
 
-This is the bar real audit tooling gets graded on. Do not soften it, and do not let a
-near-miss inflate the score — a MISS that reads as "close" is still a bug that would not have
-been submitted.
-
-Also list, in off_catalog, any candidate finding that matches NO ground-truth bug. Some of
-these are noise, but some may be real bugs outside the answer key — surface them rather than
-silently counting them as false positives.
+This is the bar real audit tooling gets graded on. Do not soften it, and do not let a near-miss
+inflate the score — a MISS that reads as "close" is still a bug that would not have been
+submitted. finding_id must be exactly one of the ids in CANDIDATE FINDINGS, or null for a MISS.
+Never invent an id.
 
 Output ONLY this JSON shape:
-{"scores": [{"gt_id": "...", "verdict": "EXACT|PARTIAL|MISS", "finding_id": "<an id from CANDIDATE FINDINGS, or null>", "why": "..."}],
- "off_catalog": [{"finding_id": "...", "note": "..."}]}"""
+{"verdict": "EXACT|PARTIAL|MISS", "finding_id": "<an id from CANDIDATE FINDINGS, or null>", "why": "..."}"""
+
+
+_GT_ENTRY_RE = re.compile(r"^### ([HM]-\d+)\s*[-—]\s*(.+)$", re.M)
+
+
+def split_ground_truth(text: str) -> dict:
+    """{gt_id: full section text}. An id appearing twice (summary list, then full description)
+    keeps the LAST, longest occurrence, which is the description."""
+    entries = {}
+    matches = list(_GT_ENTRY_RE.finditer(text))
+    for i, m in enumerate(matches):
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        body = text[m.start():end].strip()
+        gid = m.group(1)
+        if gid not in entries or len(body) > len(entries[gid]):
+            entries[gid] = body
+    return entries
+
 
 _ID_RE = re.compile(r"\bF\d{3}\b")
 # "F001-F024" names a whole range, not one finding; don't let it read as a mention of F001.
@@ -154,21 +171,90 @@ def scorer_fallback_error(router) -> str:
     return ""
 
 
-async def _call_scorer(router, user_prompt: str):
-    """One scorer call, retried ONCE after a pause if it fails on a 429."""
-    for attempt in (1, 2):
+async def _score_one_call(router, gt_id: str, gt_text: str, candidates_json: str, attempt: int) -> dict:
+    """One grading call for ONE bug. Retried once on a 429; 402 aborts the whole run."""
+    user = (
+        "TASK: SCORE\n\n"
+        f"GROUND-TRUTH BUG {gt_id}:\n{gt_text}\n\n"
+        f"CANDIDATE FINDINGS:\n{candidates_json}"
+    )
+    for tries in (1, 2):
         try:
             return await router.chat_json(
-                "scorer", SYSTEM_PROMPT, user_prompt, temperature=0.0, ceiling=SCORER_CALL_CEILING
+                "scorer", SYSTEM_PROMPT, user, temperature=0.0,
+                ceiling=SCORER_CALL_CEILING,
+                # Repeats must actually re-sample: without a distinct salt every repeat is one
+                # cache hit and the "majority" is one opinion counted three times.
+                cache_salt=f"{gt_id}#{attempt}",
             )
         except OutOfCredits:
             raise
         except Exception as exc:  # noqa: BLE001
-            if attempt == 1 and "429" in str(exc):
-                print(f"scorer rate-limited (429); retrying once in {RETRY_DELAY_SECONDS}s")
+            if tries == 1 and "429" in str(exc):
                 await asyncio.sleep(RETRY_DELAY_SECONDS)
                 continue
-            raise
+            # NOT silently a MISS: an ungraded bug that counts as MISS understates recall and
+            # looks identical to a real miss. Marked failed and reconciled by the caller.
+            print(f"  {gt_id}: grading call failed ({str(exc)[:80]})")
+            return {"verdict": None, "failed": True, "why": f"grading call failed: {exc}"}
+
+
+def majority(votes: list) -> tuple:
+    """(verdict, agreement, finding_id). With no majority, take the most conservative verdict
+    seen: an unreproducible match is not a match."""
+    verdicts = [v.get("verdict") for v in votes]
+    counts = Counter(verdicts)
+    top, n = counts.most_common(1)[0]
+    if n == 1:  # all three disagreed
+        top = min(verdicts, key=lambda x: _VERDICTS.index(x) if x in _VERDICTS else -1, default="MISS")
+        top = "MISS" if "MISS" in verdicts else top
+        n = counts[top]
+    ids = [v.get("finding_id") for v in votes if v.get("verdict") == top and v.get("finding_id")]
+    return top, f"{n}/{len(votes)}", (Counter(ids).most_common(1)[0][0] if ids else None)
+
+
+async def score_all_bugs(router, gt_entries: dict, candidates: list, repeats: int = SCORE_REPEATS):
+    """One call per ground-truth bug, repeated `repeats` times, majority wins.
+
+    Provider concurrency bounds how many run at once (openrouter: 2).
+    """
+    candidates_json = json.dumps(candidates, indent=2, sort_keys=True)
+    jobs = [(gid, attempt) for gid in sorted(gt_entries) for attempt in range(repeats)]
+    print(f"scoring {len(gt_entries)} ground-truth bugs x {repeats} repeats = {len(jobs)} calls")
+
+    results = await asyncio.gather(*(
+        _score_one_call(router, gid, gt_entries[gid], candidates_json, attempt) for gid, attempt in jobs
+    ))
+
+    by_bug = {}
+    for (gid, _), res in zip(jobs, results):
+        by_bug.setdefault(gid, []).append(res if isinstance(res, dict) else {"verdict": None, "failed": True})
+
+    ungradeable = [gid for gid, votes in by_bug.items() if all(v.get("failed") for v in votes)]
+    if ungradeable:
+        raise RuntimeError(
+            f"{len(ungradeable)} ground-truth bug(s) could not be graded at all "
+            f"({', '.join(sorted(ungradeable)[:5])}): scoring them as MISS would understate recall"
+        )
+
+    scores, agreements = [], {}
+    for gid in sorted(gt_entries):
+        votes = [v for v in by_bug[gid] if not v.get("failed")]
+        verdict, agreement, fid = majority(votes)
+        agreements[gid] = agreement
+        why = next((v.get("why", "") for v in votes if v.get("verdict") == verdict), "")
+        scores.append({"gt_id": gid, "verdict": verdict, "finding_id": fid,
+                       "why": why, "agreement": agreement,
+                       "votes": [v.get("verdict") for v in votes]})
+    return scores, agreements
+
+
+def derive_off_catalog(scores: list, candidates: list) -> list:
+    """Candidates no bug matched. Derived, not asked for: it needs no judgement, and a model
+    asked to list them alongside grading was the source of the old boilerplate."""
+    matched = {s["finding_id"] for s in scores if s.get("finding_id")}
+    return [{"finding_id": c["id"], "note": "matched no ground-truth bug"}
+            for c in candidates if c.get("id") not in matched]
 
 
 def select_scored(findings: list, mode: str, include_killed: bool = False, as_gate: bool = False) -> list:
@@ -213,6 +299,11 @@ async def score(args) -> int:
         print(f"score: cannot read inputs: {exc}")
         return 1
 
+    gt_entries = split_ground_truth(truth_text)
+    if not gt_entries:
+        print(f"score: no '### <id> - <title>' ground-truth entries found in {args.truth}")
+        return 1
+
     include_killed = getattr(args, "include_killed", False)
     as_gate = getattr(args, "as_gate", False)
     judge_mode = meta.get("judge_mode", "gate")
@@ -222,21 +313,16 @@ async def score(args) -> int:
           f"(run judge_mode={judge_mode}{', as-gate' if as_gate else ''}{', include-killed' if include_killed else ''})")
     candidates = [_candidate_summary(f) for f in scored_findings]
     known_ids = {f.get("id") for f in scored_findings}
-
-    user_prompt = (
-        "TASK: SCORE\n\n"
-        f"GROUND TRUTH:\n{truth_text}\n\n"
-        f"CANDIDATE FINDINGS:\n{json.dumps(candidates, indent=2, sort_keys=True)}"
-    )
+    repeats = int(getattr(args, "repeats", None) or SCORE_REPEATS)
 
     router = None
     try:
         router = Router(models_path=args.models, local_only=args.local_only)
-        data = await _call_scorer(router, user_prompt)
+        scores, agreements = await score_all_bugs(router, gt_entries, candidates, repeats)
     except OutOfCredits as exc:
         print(f"OUT OF CREDITS — run aborted: {exc}")
         return 2
-    except Exception as exc:  # noqa: BLE001 - a scorer failure is a clean exit, not a traceback
+    except Exception as exc:  # noqa: BLE001
         print(f"score failed: {str(exc)[:300]}")
         return 1
 
@@ -246,20 +332,10 @@ async def score(args) -> int:
               f"no score.json written.")
         return 2
 
-    scores = data.get("scores", []) if isinstance(data, dict) else []
-    off_catalog = data.get("off_catalog", []) if isinstance(data, dict) else []
-
     sanitize_warnings = _sanitize(scores, known_ids)
     for w in sanitize_warnings:
         print(f"WARNING: {w}")
-
-    top_id, share = degenerate_share(scores)
-    degenerate = len(scores) >= DEGENERATE_MIN_SCORES and share > DEGENERATE_SHARE
-    if degenerate:
-        print(
-            f"WARNING: {share:.0%} of the reasons mention {top_id} — the scorer likely degenerated "
-            f"(comparing every bug against one finding). Do not trust this score."
-        )
+    off_catalog = derive_off_catalog(scores, candidates)
 
     exact = sum(1 for s in scores if s["verdict"] == "EXACT")
     partial = sum(1 for s in scores if s["verdict"] == "PARTIAL")
@@ -270,20 +346,20 @@ async def score(args) -> int:
     matched_ids = {s["finding_id"] for s in scores if s["finding_id"] in known_ids}
     precision = (len(matched_ids) / len(scored_findings) * 100) if scored_findings else 0.0
 
-    print(f"{'gt_id':10} {'verdict':8} {'finding':8} why")
+    unanimous = sum(1 for a in agreements.values() if a.startswith(str(repeats)))
+    print(f"{'gt_id':7} {'verdict':8} {'agree':6} {'finding':8} why")
     for s in scores:
-        finding_col = str(s.get("finding_id") or "-")
-        print(f"{s.get('gt_id', ''):10} {s['verdict']:8} {finding_col:8} {s.get('why', '')}")
+        print(f"{s['gt_id']:7} {s['verdict']:8} {s.get('agreement',''):6} "
+              f"{str(s.get('finding_id') or '-'):8} {s.get('why','')[:90]}")
     print()
     print(f"EXACT: {exact}  PARTIAL: {partial}  MISS: {miss}")
     print(f"weighted recall: {weighted_recall:.1f}%")
     print(f"precision proxy: {precision:.1f}%")
+    print(f"scorer agreement: {unanimous}/{n} bugs unanimous across {repeats} repeats")
 
     if off_catalog:
         print()
-        print("off-catalog (unmatched findings — may be real bugs outside the answer key):")
-        for entry in off_catalog:
-            print(f"  {entry.get('finding_id', '')}: {entry.get('note', '')}")
+        print(f"off-catalog: {len(off_catalog)} candidate(s) matched no ground-truth bug")
 
     result = {
         "scores": scores,
@@ -295,7 +371,9 @@ async def score(args) -> int:
         "as_gate": as_gate,
         "judge_mode": judge_mode,
         "scored_finding_ids": sorted(known_ids),
-        "degenerate_warning": degenerate,
+        "repeats": repeats,
+        "agreement": agreements,
+        "unanimous_bugs": unanimous,
         "downgraded": sanitize_warnings,
         "provenance_mismatches": provenance_problems,
         "cost": router.report(),

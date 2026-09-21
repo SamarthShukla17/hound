@@ -161,6 +161,8 @@ def build_parser() -> argparse.ArgumentParser:
     score.add_argument("truth")
     score.add_argument("--include-killed", dest="include_killed", action="store_true",
                        help="score every finding, including those removed by deterministic gates")
+    score.add_argument("--repeats", type=int, default=None,
+                       help="grading repeats per ground-truth bug; majority wins (default 3)")
     score.add_argument("--as-gate", dest="as_gate", action="store_true",
                        help="score only what a judge gate would have kept (drop every judge kill)")
     score.set_defaults(handler=_cmd_score)
