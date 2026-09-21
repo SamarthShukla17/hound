@@ -31,8 +31,12 @@ def test_role_providers_exist():
 def test_only_the_intended_paid_model_is_active():
     config = load_models_config()
     active_models = {t["model"] for targets in config["roles"].values() for t in targets}
-    # gpt-5.6-luna and grok-4.6 stay commented out; z-ai/glm-5.3-flash is the one paid model.
-    assert active_models <= {"glm-4.7-flash", "cohere/north-mini-code:free", "z-ai/glm-5.3-flash"}
+    # gpt-5.6-luna and grok-4.6 stay commented out. Two paid models are active: glm-4.7-flash
+    # hunts (the only model measured to hunt productively) and glm-5.3-flash judges/scores.
+    assert active_models <= {
+        "glm-4.7-flash", "cohere/north-mini-code:free",
+        "z-ai/glm-4.7-flash", "z-ai/glm-5.3-flash",
+    }
 
 
 def test_no_role_uses_a_random_model_router():

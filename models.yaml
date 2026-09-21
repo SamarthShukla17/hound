@@ -79,20 +79,21 @@ max_tokens:
 #   zai:        extra_body.thinking.type=disabled             (confirmed working 2026-09-20: a one-word ping
 #                                                              dropped from 166 completion tokens to 2)
 roles:
-  # PINNED to openrouter z-ai/glm-5.3-flash, SOLE target, no fallback (2026-09-21).
-  # History, all measured: "openrouter/free" routed to a random model per call so seeds were
-  # not replicates; cohere/north-mini-code:free collapsed as a hunter (4/7/0 raw candidates,
-  # one seed found nothing from all 14 lenses); zai glm-4.7-flash produced 36 raw but 429s
-  # constantly (code 1305) and finally blocked an entire chain at preflight. Same GLM family
-  # as 4.7-flash, paid and reliable, ~$0.08 per 3 seeds.
-  # Mandatory reasoning on this endpoint, so no reasoning-off extra (it 400s) and thinking
-  # counts against max_tokens.
-  # CAVEAT: this is also the judge model, so hunter and judge are not independent here.
+  # PINNED to openrouter z-ai/glm-4.7-flash, SOLE target, no fallback, reasoning OFF (2026-09-21).
+  # This is the only model measured to hunt productively (36 raw candidates in one seed); zai's
+  # FREE endpoint for it was the problem (429 code 1305 storms), not the model. Paid on
+  # OpenRouter at $0.061/$0.400 per M — cheaper than glm-5.3-flash and 200k context.
+  # glm-5.3-flash was tried as hunter and starved: mandatory reasoning burned the whole 20k
+  # completion budget on a 2117-line chunk, 20 of 70 lens-calls TRUNCATED, 6 raw candidates
+  # across 5 seeds. Reasoning-off here leaks some thinking prose into content, which
+  # extract_json strips (first "{" to last "}").
+  # Earlier rejects: "openrouter/free" (random model per call, seeds not replicates),
+  # cohere/north-mini-code:free (4/7/0 raw, one seed found nothing from 14 lenses).
   mapper:
-    - {provider: openrouter, model: z-ai/glm-5.3-flash}
+    - {provider: openrouter, model: z-ai/glm-4.7-flash, extra: {extra_body: {reasoning: {enabled: false}}}}
 
   hunter:
-    - {provider: openrouter, model: z-ai/glm-5.3-flash}
+    - {provider: openrouter, model: z-ai/glm-4.7-flash, extra: {extra_body: {reasoning: {enabled: false}}}}
 
   # Temperature is already 0 for judge calls (see agents.judge). PAID primary, free fallback.
   # z-ai/glm-5.3-flash has MANDATORY reasoning (a reasoning-off extra 400s: "Reasoning is
@@ -123,7 +124,8 @@ roles:
 prices:
   cohere/north-mini-code:free: [0, 0]
   glm-4.7-flash: [0, 0]
-  z-ai/glm-5.3-flash: [0.05, 0.17]
+  z-ai/glm-4.7-flash: [0.061, 0.400]
+  z-ai/glm-5.3-flash: [0.09, 0.30]
   # PAID, re-enable with the targets above:
   # gpt-5.6-luna: [0.20, 1.20]
   # grok-4.6: [2.0, 6.0]
