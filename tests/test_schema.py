@@ -11,6 +11,9 @@ def test_finding_valid_construction():
         title="Reentrancy in withdraw",
         severity="high",
         location="Vault.sol:20-25",
+        observation="line 22 sends ETH, line 24 then decrements the balance",
+        invariant="the caller's balance must fall before control leaves the contract",
+        violation="a re-entering receiver reads the pre-decrement balance",
         root_cause="state updated after the external call",
         impact="attacker drains the vault",
         exploit_steps=["deposit", "call withdraw with a malicious receiver", "reenter"],
@@ -25,6 +28,7 @@ def test_finding_rejects_bad_severity():
             title="x",
             severity="apocalyptic",
             location="Vault.sol:1",
+            observation="o", invariant="inv", violation="v",
             root_cause="x",
             impact="x",
             exploit_steps=[],
@@ -37,6 +41,7 @@ def test_finding_confidence_bounds():
             title="x",
             severity="low",
             location="Vault.sol:1",
+            observation="o", invariant="inv", violation="v",
             root_cause="x",
             impact="x",
             exploit_steps=[],
@@ -46,9 +51,9 @@ def test_finding_confidence_bounds():
 
 def test_one_malformed_finding_does_not_discard_the_others():
     raw = [
-        {"title": "ok one", "severity": "low", "location": "V.sol:1", "root_cause": "r", "impact": "i", "exploit_steps": []},
-        {"title": "bad one", "severity": "not-a-severity", "location": "V.sol:1", "root_cause": "r", "impact": "i", "exploit_steps": []},
-        {"title": "ok two", "severity": "medium", "location": "V.sol:2", "root_cause": "r", "impact": "i", "exploit_steps": []},
+        {"title": "ok one", "severity": "low", "location": "V.sol:1", "observation": "o", "invariant": "inv", "violation": "v", "root_cause": "r", "impact": "i", "exploit_steps": []},
+        {"title": "bad one", "severity": "not-a-severity", "location": "V.sol:1", "observation": "o", "invariant": "inv", "violation": "v", "root_cause": "r", "impact": "i", "exploit_steps": []},
+        {"title": "ok two", "severity": "medium", "location": "V.sol:2", "observation": "o", "invariant": "inv", "violation": "v", "root_cause": "r", "impact": "i", "exploit_steps": []},
     ]
     good = []
     for entry in raw:
@@ -105,3 +110,36 @@ def test_verdict_coerces_null_killed_by_to_empty_string():
 def test_verdict_missing_verdict_is_still_a_validation_error():
     with pytest.raises(ValidationError):
         Verdict(**{"auditor": "Senior Smart-contract auditor", "evidence": []})
+
+
+# --- mechanism before impact -----------------------------------------------------------------
+
+
+def _mechanism(**over):
+    base = dict(title="t", severity="high", location="V.sol:1", observation="o", invariant="i",
+                violation="v", root_cause="r", impact="im", exploit_steps=[])
+    base.update(over)
+    return base
+
+
+def test_a_finding_that_asserts_impact_without_stating_mechanism_is_rejected():
+    """The dominant hunter failure is naming the right lines and inventing the wrong defect.
+    An impact with nothing derived beneath it is not a finding."""
+    raw = {"title": "Drains the vault", "severity": "critical", "location": "V.sol:20",
+           "root_cause": "rounding", "impact": "attacker drains all funds", "exploit_steps": []}
+    with pytest.raises(ValidationError) as exc:
+        Finding(**raw)
+    missing = {e["loc"][0] for e in exc.value.errors()}
+    assert {"observation", "invariant", "violation"} <= missing
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+@pytest.mark.parametrize("field", ["observation", "invariant", "violation"])
+def test_a_blank_mechanism_field_does_not_satisfy_the_requirement(field, blank):
+    with pytest.raises(ValidationError):
+        Finding(**_mechanism(**{field: blank}))
+
+
+def test_a_fully_derived_finding_is_accepted():
+    f = Finding(**_mechanism())
+    assert f.observation and f.invariant and f.violation

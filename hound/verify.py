@@ -157,8 +157,26 @@ def _spans_close(spans_a, spans_b, tolerance: int = MERGE_LINE_TOLERANCE) -> boo
     return False
 
 
+def _spans_overlap(spans_a, spans_b) -> bool:
+    """TRUE overlap in the same file (shared lines), not mere proximity."""
+    for src_a, a1, b1 in spans_a:
+        for src_b, a2, b2 in spans_b:
+            if src_a is src_b and max(a1, a2) <= min(b1, b2):
+                return True
+    return False
+
+
 def _should_merge(c: dict, o: dict, files) -> bool:
-    if _spans_close(spans(c["location"], files), spans(o["location"], files)):
+    c_spans, o_spans = spans(c["location"], files), spans(o["location"], files)
+
+    # Same-location guard. One observation restated with a different invented consequence is
+    # one candidate, not several: eight paraphrases of a single rounding observation once
+    # survived dedup because each had a different title and root_cause and so cleared both
+    # similarity tests. Overlapping lines in the same file merge regardless of wording.
+    if _spans_overlap(c_spans, o_spans):
+        return True
+
+    if _spans_close(c_spans, o_spans):
         if _similarity(c.get("title", ""), o.get("title", "")) > TITLE_SIMILARITY_THRESHOLD:
             return True
     if _similarity(c.get("root_cause", ""), o.get("root_cause", "")) > ROOT_CAUSE_SIMILARITY_THRESHOLD:
@@ -177,6 +195,13 @@ def dedup(cands, files):
         if target is not None:
             target["lenses"] = sorted(set(target.get("lenses", [])) | set(c.get("lenses", [])))
             target["votes"] = target.get("votes", 1) + c.get("votes", 1)
+            # `ordered` is severity-sorted, so `target` is already the highest-severity member.
+            # The merged candidate's own reading is kept as an alternate rather than discarded:
+            # when several candidates sit on one line range, their differing impacts are the
+            # evidence that the consequence was invented.
+            alternate = {k: c.get(k, "") for k in ("title", "severity", "impact", "root_cause")}
+            if alternate not in target.setdefault("alternates", []):
+                target["alternates"].append(alternate)
         else:
             merged.append(dict(c))
 

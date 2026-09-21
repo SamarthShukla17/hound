@@ -209,3 +209,94 @@ def test_edited_content_at_the_same_path_is_stale():
     edited = Src(path="src/Vault.sol", lines=[f"line_{i}" for i in range(1, 50)] + ["// a new guard"])
     assert edited.sha256 != original.sha256
     assert spans("src/Vault.sol:12", [edited], expected_hash=original.sha256) == []
+
+
+# --- same-location guard: one observation, many invented consequences -------------------------
+# Wordings below are deliberately UNALIKE (verified by the first test) so that any merging is
+# attributable to the location guard and not to the pre-existing similarity rules.
+
+DISTINCT_READINGS = [
+    ("Unbounded token minting via listing", "supply expands without a matching deposit", "unbacked mint"),
+    ("Permanent lock of seller proceeds", "withdrawal precondition becomes unsatisfiable", "funds stranded forever"),
+    ("Griefing through zero-value orders", "a cheap call poisons later legitimate operations", "denial of service"),
+    ("Protocol insolvency from fee accrual", "obligations exceed reserves after settlement", "protocol cannot pay out"),
+    ("Buyer overpays relative to delivery", "payment and delivery quantities diverge", "value leaks to the seller"),
+    ("Oracle staleness admits bad pricing", "a cached quote outlives its validity window", "mispriced execution"),
+    ("Whitelist capacity silently exceeded", "membership count passes its configured ceiling", "access control bypassed"),
+    ("Refund path double-credits a claimant", "a claim is settled twice against one entry", "double spend"),
+]
+
+
+def _reading(i, sev="high", loc="src/Vault.sol:20-30"):
+    title, cause, impact = DISTINCT_READINGS[i]
+    return {"title": title, "severity": sev, "location": loc, "root_cause": cause,
+            "impact": impact, "lenses": [f"L{i}"], "votes": 1}
+
+
+def test_the_fixture_readings_are_genuinely_dissimilar(files):
+    """Guard on the guard: if these merged by title/root_cause similarity, the tests below
+    would prove nothing about the location rule."""
+    from hound.verify import ROOT_CAUSE_SIMILARITY_THRESHOLD, TITLE_SIMILARITY_THRESHOLD, _similarity
+
+    for i in range(len(DISTINCT_READINGS)):
+        for j in range(i + 1, len(DISTINCT_READINGS)):
+            a, b = _reading(i), _reading(j)
+            assert _similarity(a["root_cause"], b["root_cause"]) <= ROOT_CAUSE_SIMILARITY_THRESHOLD
+            assert _similarity(a["title"], b["title"]) <= TITLE_SIMILARITY_THRESHOLD
+
+
+def test_distinct_readings_of_the_same_lines_collapse_to_one_candidate(files):
+    """The real failure: eight restatements of ONE rounding observation survived dedup because
+    each had a different title and root_cause, so both similarity tests passed them."""
+    result = dedup([_reading(i) for i in range(8)], files)
+
+    assert len(result) == 1
+    assert result[0]["votes"] == 8
+    assert result[0]["lenses"] == sorted((f"L{i}" for i in range(8)), key=str)
+
+
+def test_the_highest_severity_member_is_the_one_kept(files):
+    cands = [_reading(0, sev="medium"), _reading(1, sev="critical"), _reading(2, sev="low")]
+    result = dedup(cands, files)
+    assert len(result) == 1 and result[0]["severity"] == "critical"
+    assert result[0]["title"] == DISTINCT_READINGS[1][0]
+
+
+def test_the_other_readings_are_kept_as_alternates_not_discarded(files):
+    """When several candidates sit on one line range, their differing impacts ARE the evidence
+    that the consequence was invented — so they are recorded, not dropped."""
+    result = dedup([_reading(i) for i in range(3)], files)
+
+    alternates = result[0]["alternates"]
+    assert len(alternates) == 2
+    assert {a["impact"] for a in alternates} == {DISTINCT_READINGS[1][2], DISTINCT_READINGS[2][2]}
+    assert all({"title", "severity", "impact", "root_cause"} == set(a) for a in alternates)
+
+
+def test_an_identical_reading_is_not_recorded_as_an_alternate_twice(files):
+    result = dedup([_reading(0), _reading(0)], files)
+    assert len(result[0]["alternates"]) == 1
+
+
+def test_non_overlapping_lines_in_the_same_file_stay_separate(files):
+    """The guard keys on SHARED LINES, not on sharing a file: two genuinely different bugs far
+    apart in one contract must remain two candidates."""
+    assert len(dedup([_reading(0, loc="src/Vault.sol:20-30"),
+                      _reading(1, loc="src/Vault.sol:200-210")], files)) == 2
+
+
+def test_nearby_but_non_overlapping_spans_stay_separate_when_wording_differs(files):
+    assert len(dedup([_reading(0, loc="src/Vault.sol:20-30"),
+                      _reading(1, loc="src/Vault.sol:45-55")], files)) == 2
+
+
+def test_an_unresolvable_location_cannot_merge_by_the_location_guard(files):
+    """A hallucinated path has no spans, so it must not be swept into a real candidate."""
+    assert len(dedup([_reading(0, loc="src/Vault.sol:20-30"),
+                      _reading(1, loc="NoSuchFile.sol:20-30")], files)) == 2
+
+
+def test_touching_spans_share_a_line_and_therefore_merge(files):
+    """20-30 and 30-40 share line 30 — that is overlap, not mere adjacency."""
+    assert len(dedup([_reading(0, loc="src/Vault.sol:20-30"),
+                      _reading(1, loc="src/Vault.sol:30-40")], files)) == 1

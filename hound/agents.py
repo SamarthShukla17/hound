@@ -133,10 +133,21 @@ async def hunter(
         "Report at most 4 findings. If nothing survives its own falsification check from this "
         'lens, {"findings": []} is a correct and good answer — never force a finding to avoid '
         "an empty result.\n\n"
+        "Fill these four fields IN THIS ORDER, and do not write a later one before an earlier one:\n"
+        "  1. observation — what the cited lines literally do: the state they read or write, the "
+        "arithmetic they perform, the control flow they take. NO consequence.\n"
+        "  2. invariant — the protocol property those lines are supposed to maintain.\n"
+        "  3. violation — the specific input or call sequence that breaks that property, cited.\n"
+        "  4. impact — what follows FROM the violation. It must be derivable from 1-3 alone.\n\n"
+        "If you cannot derive the impact from your own observation and invariant, lower the "
+        "severity or return nothing. Do not assert theft, minting, draining or locking unless you "
+        "traced the value movement in the cited code. The most common failure is naming the right "
+        "lines and inventing the wrong defect.\n\n"
         'Return ONLY this JSON shape: {"findings": [{"title": "...", '
         '"severity": "critical|high|medium|low", "bug_class": "...", '
-        '"location": "path:line-or-range", "root_cause": "...", "impact": "...", '
-        '"exploit_steps": ["..."], "falsification": "...", "confidence": 0.5}]}'
+        '"location": "path:line-or-range", "observation": "...", "invariant": "...", '
+        '"violation": "...", "root_cause": "summary of observation + invariant + violation", '
+        '"impact": "...", "exploit_steps": ["..."], "falsification": "...", "confidence": 0.5}]}'
     )
     user = _user_prompt(code, map_block, notes_block, known_block, killed_block, already_block, lens_block, task)
 
@@ -157,12 +168,17 @@ async def hunter(
         return HuntResult(ok=False, error="no findings list in reply")
 
     survivors = []
+    dropped = []
     for entry in raw_findings:
         if not isinstance(entry, dict):
+            dropped.append("not an object")
             continue
         try:
             finding = Finding(**entry)
-        except ValidationError:
+        except ValidationError as exc:
+            # Visible, so a drop in candidate count is attributable to format rather than
+            # mistaken for the lens finding nothing.
+            dropped.append(",".join(str(e["loc"][0]) for e in exc.errors()))
             continue
         if finding.severity == "low":
             continue
@@ -170,6 +186,8 @@ async def hunter(
         record["lenses"] = [lens.id]
         record["votes"] = 1
         survivors.append(record)
+    if dropped:
+        print(f"[agents] hunter ({lens.id}) dropped {len(dropped)} malformed finding(s): {dropped}")
     return HuntResult(findings=survivors)
 
 
