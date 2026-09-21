@@ -457,5 +457,7 @@ def test_the_scorer_is_told_that_any_claim_matching_counts(run_dir, tmp_path, mo
         models_path.write_text(_models_yaml(mock.base_url))
         asyncio.run(score(_score_args(run_dir=str(out_dir), truth=str(truth_path), models=str(models_path))))
         system = mock.requests[-1]["messages"][0]["content"]
-    assert "ALTERNATE CLAIMS" in system
-    assert "If ANY of them names the ground-truth defect, that is a match" in system
+    flat = " ".join(system.split())  # the prompt is hard-wrapped
+    assert "ALTERNATE CLAIMS" in flat
+    assert "If ANY of them names the ground-truth defect, that is a match" in flat
+    assert "an earlier pass's explanation that a later one replaced" in flat
