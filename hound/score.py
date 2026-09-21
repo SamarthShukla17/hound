@@ -24,6 +24,11 @@ For EACH ground-truth bug, decide whether ANY of the candidate findings names th
 root-cause defect — the same specific thing wrong in the code, not merely the same file or
 function — and whether that finding's fix would actually eliminate the bug.
 
+ALTERNATE CLAIMS: a candidate may carry alternate_claims — other readings of the SAME lines
+(an earlier pass's explanation that a later one replaced, or merged duplicates). Consider the
+primary reading AND every alternate. If ANY of them names the ground-truth defect, that is a
+match: credit the candidate by its id and say in "why" which reading matched.
+
 COVERAGE: you must consider EVERY candidate finding for EVERY ground-truth bug. Do not compare a
 bug against only the first finding or the most prominent one. In each "why", name the finding you
 matched, or for a MISS name the closest finding you checked and say how it differs. finding_id must
@@ -53,7 +58,15 @@ _VERDICTS = ("EXACT", "PARTIAL", "MISS")
 
 
 def _candidate_summary(finding: dict) -> dict:
-    return {
+    """One candidate for the scorer, carrying every claim made about those lines.
+
+    A candidate can hold more than one reading of the same code: the diagnose stage replaces
+    the locating pass's explanation but keeps it as hunter_claim, and dedup keeps merged
+    paraphrases as alternates. Scoring only the primary loses a bug whose CORRECT reading was
+    the one replaced (M-10 was matched before diagnosis and lost after). Any claim matching
+    counts, so the candidate is credited if any reading of it was right.
+    """
+    summary = {
         "id": finding.get("id"),
         "title": finding.get("title"),
         "severity": finding.get("severity"),
@@ -61,6 +74,18 @@ def _candidate_summary(finding: dict) -> dict:
         "root_cause": finding.get("root_cause"),
         "impact": finding.get("impact"),
     }
+
+    claims = []
+    hunter = finding.get("hunter_claim")
+    if isinstance(hunter, dict) and (hunter.get("root_cause") or hunter.get("impact")):
+        claims.append({"source": "located (pre-diagnosis)", "title": hunter.get("title", ""),
+                       "root_cause": hunter.get("root_cause", ""), "impact": hunter.get("impact", "")})
+    for alt in finding.get("alternates") or []:
+        claims.append({"source": "merged duplicate", "title": alt.get("title", ""),
+                       "root_cause": alt.get("root_cause", ""), "impact": alt.get("impact", "")})
+    if claims:
+        summary["alternate_claims"] = claims
+    return summary
 
 
 def degenerate_share(scores: list) -> tuple:

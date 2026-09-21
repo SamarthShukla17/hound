@@ -7,7 +7,7 @@ import textwrap
 
 import pytest
 
-from hound.score import score, select_scored, union_scores
+from hound.score import _candidate_summary, score, select_scored, union_scores
 from tests.mock_server import MockServer
 
 
@@ -416,3 +416,46 @@ def test_the_scorer_gets_a_generous_call_ceiling(run_dir, fake_router):
     finally:
         del FakeScorerRouter.chat_json
     assert seen["ceiling"] == SCORER_CALL_CEILING >= 900
+
+
+# --- every claim about a candidate's lines reaches the scorer ---------------------------------
+
+
+def test_a_replaced_diagnosis_is_still_offered_to_the_scorer():
+    """Regression: M-10 was MATCHED before the diagnose stage and LOST after, because the
+    diagnoser overwrote a correct reading. Scoring only the survivor throws that away."""
+    summary = _candidate_summary({
+        "id": "F001", "title": "diagnosed", "severity": "high", "location": "V.sol:20-30",
+        "root_cause": "diagnosed cause", "impact": "diagnosed impact",
+        "hunter_claim": {"title": "located", "root_cause": "located cause", "impact": "located impact"},
+    })
+    assert summary["root_cause"] == "diagnosed cause"          # primary is the diagnosis
+    claims = summary["alternate_claims"]
+    assert [c["root_cause"] for c in claims] == ["located cause"]
+    assert claims[0]["source"] == "located (pre-diagnosis)"
+
+
+def test_merged_duplicates_are_also_offered_as_claims():
+    summary = _candidate_summary({
+        "id": "F001", "root_cause": "primary", "impact": "i", "location": "V.sol:1",
+        "alternates": [{"title": "t", "root_cause": "other reading", "impact": "other impact", "severity": "low"}],
+    })
+    assert [c["source"] for c in summary["alternate_claims"]] == ["merged duplicate"]
+
+
+def test_an_empty_hunter_claim_adds_nothing():
+    for hc in ({}, {"title": "t"}, None):
+        assert "alternate_claims" not in _candidate_summary(
+            {"id": "F1", "root_cause": "r", "impact": "i", "hunter_claim": hc})
+
+
+def test_the_scorer_is_told_that_any_claim_matching_counts(run_dir, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    out_dir, truth_path = run_dir
+    with MockServer() as mock:
+        models_path = tmp_path / "models.yaml"
+        models_path.write_text(_models_yaml(mock.base_url))
+        asyncio.run(score(_score_args(run_dir=str(out_dir), truth=str(truth_path), models=str(models_path))))
+        system = mock.requests[-1]["messages"][0]["content"]
+    assert "ALTERNATE CLAIMS" in system
+    assert "If ANY of them names the ground-truth defect, that is a match" in system
