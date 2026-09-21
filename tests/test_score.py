@@ -144,7 +144,7 @@ class FakeScorerRouter:
     def report(self):
         return {"models": [], "total_usd": 0.0, "calls": list(self.call_log)}
 
-    async def chat_json(self, role, system, user, *, temperature=0.3, max_tokens=None):
+    async def chat_json(self, role, system, user, *, temperature=0.3, max_tokens=None, ceiling=None):
         type(self).calls += 1
         self.call_log.append({"role": role, "model": type(self).answered_by})
         item = type(self).responses.pop(0)
@@ -397,3 +397,22 @@ def test_a_score_on_the_configured_model_is_written_normally(run_dir, fake_route
     fake_router.responses = [_scores([("EXACT", "F001", "matches F001")])]
     assert _run(run_dir) == 0
     assert (run_dir[0] / "score.json").exists()
+
+
+def test_the_scorer_gets_a_generous_call_ceiling(run_dir, fake_router):
+    """One scoring call grades every candidate against every ground-truth bug — the longest
+    single call the harness makes. It overran the default 300s ceiling on a real run."""
+    from hound.score import SCORER_CALL_CEILING
+
+    seen = {}
+
+    async def capture(self, role, system, user, *, temperature=0.3, max_tokens=None, ceiling=None):
+        seen["ceiling"] = ceiling
+        return _scores([("EXACT", "F001", "w")])
+
+    FakeScorerRouter.chat_json = capture
+    try:
+        assert _run(run_dir) == 0
+    finally:
+        del FakeScorerRouter.chat_json
+    assert seen["ceiling"] == SCORER_CALL_CEILING >= 900

@@ -4,7 +4,7 @@ import asyncio
 
 import pytest
 
-from hound.agents import hunter, judge, mapper, poc, system
+from hound.agents import diagnose, hunter, judge, mapper, poc, system
 from hound.knowledge import KB, Lens
 from hound.schema import Verdict
 
@@ -338,3 +338,66 @@ def test_a_kill_without_a_disproof_citation_gets_one_repair_then_becomes_needs_p
     result = asyncio.run(judge(r, kb, "judge", CAND, CODE))
     assert result.verdict == "needs_poc"
     assert len(r.calls) == 2  # one repair, not a loop
+
+
+class Recorder:
+    def __init__(self, result):
+        self.result, self.calls = result, []
+
+    async def chat_json(self, role, system, user, *, temperature=0.3, max_tokens=None, cache_salt=""):
+        self.calls.append({"role": role, "system": system, "user": user})
+        return self.result
+
+
+# --- diagnose: read the region cold ------------------------------------------------------------
+
+CAND_WITH_STORY = {
+    "id": "F001", "title": "Attacker drains the vault via missing ownership check",
+    "location": "src/Vault.sol:12-14",
+    "root_cause": "transferVesting does not verify the caller owns the tokens",
+    "impact": "an attacker steals every beneficiary's allocation",
+}
+
+
+def test_diagnose_is_never_shown_the_locating_passs_story(kb):
+    """The measured failure is a hunter reaching the right lines and inventing the defect.
+    Handing the diagnoser that invention would just launder it."""
+    r = Recorder({"defect_found": True, "observation": "o", "invariant": "i", "violation": "v", "impact": "im"})
+    asyncio.run(diagnose(r, kb, "  12| code here", CAND_WITH_STORY["location"]))
+
+    prompt = r.calls[0]["user"]
+    assert "src/Vault.sol:12-14" in prompt          # the location IS given
+    assert "  12| code here" in prompt               # so is the code
+    for leaked in ("drains the vault", "missing ownership check", "does not verify the caller owns",
+                   "steals every beneficiary"):
+        assert leaked not in prompt
+
+
+def test_diagnose_prompt_permits_finding_nothing_and_a_different_defect(kb):
+    r = Recorder({"defect_found": False, "observation": "the guard is present"})
+    asyncio.run(diagnose(r, kb, "  1| x", "V.sol:1"))
+    prompt = r.calls[0]["user"]
+    assert "nothing is wrong here" in prompt.lower()
+    assert "may be a different defect" in prompt.lower()
+    assert "defect_found" in prompt
+
+
+def test_diagnose_orders_mechanism_before_impact(kb):
+    r = Recorder({"defect_found": True})
+    asyncio.run(diagnose(r, kb, "  1| x", "V.sol:1"))
+    p = r.calls[0]["user"]
+    # the numbered instruction list, not the first mention of each word in prose
+    assert p.index("1. observation") < p.index("2. invariant") < p.index("3. violation") < p.index("4. impact")
+    assert "do not write a later one before an earlier one" in p
+
+
+def test_diagnose_uses_its_own_role_and_returns_empty_on_failure(kb):
+    r = Recorder({"defect_found": True})
+    asyncio.run(diagnose(r, kb, "  1| x", "V.sol:1"))
+    assert r.calls[0]["role"] == "diagnose"
+
+    class Broken:
+        async def chat_json(self, *a, **k):
+            raise RuntimeError("all targets failed")
+
+    assert asyncio.run(diagnose(Broken(), kb, "  1| x", "V.sol:1")) == {}

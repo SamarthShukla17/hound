@@ -292,3 +292,54 @@ async def poc(r, kb, cand: dict, code: str, framework: str = "foundry", refs: st
     except Exception as exc:  # noqa: BLE001
         print(f"[agents] poc failed: {exc}")
         return f"// PoC generation failed: {exc}\n// This is a stub, not a test.\n"
+
+
+DIAGNOSE_TASK = (
+    "TASK: DIAGNOSE\n"
+    "Something at the cited lines may be wrong. You have NOT been told what anyone thinks the "
+    "problem is, on purpose: a prior pass located these lines but its explanation is withheld so "
+    "it cannot anchor you on the wrong story.\n\n"
+    "Read the code and state what, if anything, ACTUALLY violates an invariant here. It may be a "
+    "different defect from the one you would expect at such lines, and it may be nothing at all — "
+    "\"nothing is wrong here\" is a correct and valuable answer.\n\n"
+    "Fill these IN THIS ORDER, and do not write a later one before an earlier one:\n"
+    "  1. observation — what the cited lines literally do: state read or written, arithmetic "
+    "performed, control flow taken. NO consequence.\n"
+    "  2. invariant — the protocol property those lines are supposed to maintain.\n"
+    "  3. violation — the specific input or call sequence that breaks that property, cited.\n"
+    "  4. impact — what follows FROM the violation, derivable from 1-3 alone.\n\n"
+    "Do not assert theft, minting, draining or locking unless you traced the value movement in "
+    "the code above. If nothing here breaks an invariant, set defect_found to false and say why "
+    "in observation.\n\n"
+    'Return ONLY this JSON shape: {"defect_found": true, "title": "...", '
+    '"severity": "critical|high|medium|low", "bug_class": "...", "observation": "...", '
+    '"invariant": "...", "violation": "...", "impact": "...", '
+    '"exploit_steps": ["..."], "falsification": "...", "confidence": 0.5}'
+)
+
+
+async def diagnose(r, kb, code: str, location: str, pmap=None, scope=None, notes: str = "", cache_salt: str = ""):
+    """Read the cited region cold and say what is actually wrong there, if anything.
+
+    Deliberately receives the location and the code but NOT the locating pass's root_cause or
+    impact. The measured failure mode is that a hunter reaches the right lines and then invents
+    the defect; handing its story to the diagnoser would just launder that story. Returns a dict
+    with defect_found plus the mechanism fields, or {} if the call fails.
+    """
+    sys_prompt = system(kb, scope)
+    map_block = _map_block(pmap)
+    notes_block = f"SCOPE NOTES (trusted roles, exclusions):\n{notes}" if notes else ""
+    loc_block = f"LINES TO EXAMINE: {location}"
+    user = _user_prompt(code, map_block, notes_block, loc_block, DIAGNOSE_TASK)
+
+    try:
+        data = await r.chat_json("diagnose", sys_prompt, user, temperature=0.0, **_salt(cache_salt))
+    except OutOfCredits:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        print(f"[agents] diagnose ({location}) failed: {exc}")
+        return {}
+    if not isinstance(data, dict):
+        print(f"[agents] diagnose ({location}) returned a non-object")
+        return {}
+    return data

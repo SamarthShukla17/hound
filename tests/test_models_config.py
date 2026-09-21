@@ -70,5 +70,9 @@ def test_role_max_tokens_are_positive_ints_for_known_roles():
 
 
 def test_judge_and_scorer_have_the_large_reasoning_budget():
+    """Mandatory-reasoning models spend the completion budget thinking before emitting any
+    content. The scorer needs the most: one call grades EVERY candidate against EVERY
+    ground-truth bug, and 25 candidates x 23 bugs overflowed 24000."""
     caps = load_models_config()["max_tokens"]
-    assert caps["judge"] == 24000 and caps["judge2"] == 24000 and caps["scorer"] == 24000
+    assert caps["judge"] == 24000 and caps["judge2"] == 24000
+    assert caps["scorer"] >= 60000

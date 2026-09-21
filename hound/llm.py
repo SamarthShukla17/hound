@@ -42,7 +42,7 @@ DEFAULT_MAX_TOKENS = {
     "judge": 24000,
     "judge2": 24000,
     "poc": 8000,
-    "scorer": 24000,
+    "scorer": 60000,
 }
 FALLBACK_MAX_TOKENS = 2048
 
@@ -493,9 +493,11 @@ class Router:
         temperature: float = 0.3,
         max_tokens: int | None = None,
         cache_salt: str = "",
+        ceiling: float = CALL_CEILING_SECONDS,
     ) -> dict:
         text = await self.chat(
-            role, system, user, temperature=temperature, max_tokens=max_tokens, cache_salt=cache_salt
+            role, system, user, temperature=temperature, max_tokens=max_tokens,
+            cache_salt=cache_salt, ceiling=ceiling,
         )
         data = extract_json(text)
         if data is not None:
@@ -506,7 +508,8 @@ class Router:
             "parse. Return ONLY the corrected JSON object, nothing else.\n\n" + text
         )
         repaired = await self.chat(
-            role, system, repair_user, temperature=0.0, max_tokens=max_tokens, cache_salt=cache_salt
+            role, system, repair_user, temperature=0.0, max_tokens=max_tokens,
+            cache_salt=cache_salt, ceiling=ceiling,
         )
         data = extract_json(repaired)
         if data is not None:

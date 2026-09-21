@@ -9,7 +9,9 @@ from pathlib import Path
 import pytest
 
 from hound.codebase import check_provenance, file_sha256, load
-from hound.pipeline import _cited_salt, citation_gate, rejudge, scan, verify_disproofs
+from hound.pipeline import (
+    _cited_salt, citation_gate, group_regions, rediagnose, rejudge, run_diagnosis, scan, verify_disproofs,
+)
 from hound.runs import CITATION_GATE, STALE_CITATION
 from hound.schema import Verdict
 from tests.mock_server import FIXTURE_LOCATION, MockServer
@@ -52,6 +54,7 @@ def _models_yaml(base_url: str) -> str:
           mapper: [{{provider: mock, model: mock-model}}]
           hunter: [{{provider: mock, model: mock-model}}]
           judge: [{{provider: mock, model: mock-model}}]
+          diagnose: [{{provider: mock, model: mock-model}}]
           judge2: [{{provider: mock, model: mock-model}}]
           poc: [{{provider: mock, model: mock-model}}]
           scorer: [{{provider: mock, model: mock-model}}]
@@ -80,6 +83,7 @@ def _scan_args(**overrides) -> argparse.Namespace:
         fresh=True,
         no_judge2=False,
         judge_mode="advisory",
+        no_diagnose=True,
         scope_profile="contest",
         scope_rules=None,
         cache_any_model=None,
@@ -656,3 +660,98 @@ def test_a_failed_lens_is_recorded_as_failed_not_as_a_clean_zero(
     out = capsys.readouterr().out
     assert "LENSES THAT FAILED (recall holes, not clean negatives)" in out
     assert "P1" in out
+
+
+# --- diagnose stage ---------------------------------------------------------------------------
+
+
+def _c(fid, loc):
+    return {"id": fid, "location": loc, "title": f"t{fid}", "severity": "high",
+            "root_cause": f"located story {fid}", "impact": f"claimed impact {fid}"}
+
+
+def test_candidates_on_overlapping_lines_share_one_region(tmp_path):
+    (tmp_path / "Vault.sol").write_text(FIXTURE_VAULT_SOL)
+    files = load(tmp_path)[0]
+    regions = group_regions([_c("F001", "Vault.sol:11-14"), _c("F002", "Vault.sol:13-16"),
+                             _c("F003", "Vault.sol:1-3")], files)
+    sizes = sorted(len(m) for _, m in regions)
+    assert sizes == [1, 2]  # the two overlapping candidates share a region; the far one is alone
+
+
+class _Diagnoser:
+    """Stands in for agents.diagnose; records what it was shown."""
+
+    def __init__(self, result):
+        self.result, self.seen = result, []
+
+    async def __call__(self, router, kb, code, location, pmap=None, scope=None, notes="", cache_salt=""):
+        self.seen.append({"code": code, "location": location})
+        return dict(self.result)
+
+
+def _diagnose_cands(tmp_path, monkeypatch, result, cands):
+    import hound.pipeline as pipeline
+
+    (tmp_path / "Vault.sol").write_text(FIXTURE_VAULT_SOL)
+    files = load(tmp_path)[0]
+    spy = _Diagnoser(result)
+    monkeypatch.setattr(pipeline, "diagnose", spy)
+    import asyncio
+
+    replaced = asyncio.run(run_diagnosis(None, None, cands, files, judge_budget=100_000,
+                                         map_text="", scope=None, notes=""))
+    return replaced, spy, cands
+
+
+def test_diagnosis_replaces_the_located_story_and_preserves_it_as_hunter_claim(tmp_path, monkeypatch):
+    result = {"defect_found": True, "title": "Real defect", "severity": "medium",
+              "observation": "line 14 sends ETH then line 15 decrements",
+              "invariant": "balance falls before control leaves", "violation": "re-entry at line 13",
+              "impact": "bounded value leakage"}
+    replaced, spy, cands = _diagnose_cands(tmp_path, monkeypatch, result, [_c("F001", "Vault.sol:12-14")])
+
+    assert replaced == 1
+    c = cands[0]
+    assert c["title"] == "Real defect" and c["severity"] == "medium"
+    assert c["impact"] == "bounded value leakage"
+    assert c["observation"] and c["invariant"] and c["violation"]
+    assert "|" in c["root_cause"]  # rebuilt from observation/invariant/violation
+    # the located pass's own story is kept for comparison, not silently dropped
+    assert c["hunter_claim"]["root_cause"] == "located story F001"
+    assert c["hunter_claim"]["impact"] == "claimed impact F001"
+    assert c["diagnosed"] is True and c["defect_found"] is True
+
+
+def test_one_diagnose_call_per_region_not_per_candidate(tmp_path, monkeypatch):
+    cands = [_c("F001", "Vault.sol:11-14"), _c("F002", "Vault.sol:13-16")]
+    _, spy, _ = _diagnose_cands(tmp_path, monkeypatch, {"defect_found": True, "observation": "o"}, cands)
+    assert len(spy.seen) == 1  # two candidates, one region, one call
+
+
+def test_a_region_diagnosed_clean_marks_every_candidate_in_it(tmp_path, monkeypatch):
+    result = {"defect_found": False, "observation": "the guard at line 13 already covers this"}
+    _, _, cands = _diagnose_cands(tmp_path, monkeypatch, result, [_c("F001", "Vault.sol:12-14")])
+    assert cands[0]["defect_found"] is False
+    assert "no invariant violation" in cands[0]["impact"] or cands[0]["impact"]
+
+
+def test_a_failed_diagnosis_leaves_the_candidate_untouched(tmp_path, monkeypatch):
+    replaced, _, cands = _diagnose_cands(tmp_path, monkeypatch, {}, [_c("F001", "Vault.sol:12-14")])
+    assert replaced == 0
+    assert cands[0]["root_cause"] == "located story F001"
+    assert "hunter_claim" not in cands[0]
+
+
+def test_scan_runs_the_diagnose_stage_by_default(fixture_repo, kb_dir, tmp_path, monkeypatch):
+    with MockServer() as mock:
+        _run_scan(fixture_repo, kb_dir, tmp_path, monkeypatch, mock, no_diagnose=False)
+        tasks = [r["messages"][-1]["content"] for r in mock.requests]
+    assert any("TASK: DIAGNOSE" in t for t in tasks)
+
+
+def test_no_diagnose_skips_the_stage(fixture_repo, kb_dir, tmp_path, monkeypatch):
+    with MockServer() as mock:
+        _run_scan(fixture_repo, kb_dir, tmp_path, monkeypatch, mock, no_diagnose=True)
+        tasks = [r["messages"][-1]["content"] for r in mock.requests]
+    assert not any("TASK: DIAGNOSE" in t for t in tasks)

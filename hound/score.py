@@ -11,6 +11,10 @@ from .llm import OutOfCredits, Router
 from .runs import is_hard_kill, read_findings
 
 RETRY_DELAY_SECONDS = 30
+# One scoring call grades EVERY candidate against EVERY ground-truth bug, so it is the longest
+# single call the harness makes: 25 candidates x 23 bugs on a mandatory-reasoning model runs
+# past the default per-call ceiling. Generous on purpose; the run is already finished by here.
+SCORER_CALL_CEILING = 900
 DEGENERATE_SHARE = 0.8
 DEGENERATE_MIN_SCORES = 3
 
@@ -129,7 +133,9 @@ async def _call_scorer(router, user_prompt: str):
     """One scorer call, retried ONCE after a pause if it fails on a 429."""
     for attempt in (1, 2):
         try:
-            return await router.chat_json("scorer", SYSTEM_PROMPT, user_prompt, temperature=0.0)
+            return await router.chat_json(
+                "scorer", SYSTEM_PROMPT, user_prompt, temperature=0.0, ceiling=SCORER_CALL_CEILING
+            )
         except OutOfCredits:
             raise
         except Exception as exc:  # noqa: BLE001

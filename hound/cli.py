@@ -31,6 +31,12 @@ def _cmd_rejudge(args: argparse.Namespace) -> int:
     return asyncio.run(rejudge(args))
 
 
+def _cmd_rediagnose(args: argparse.Namespace) -> int:
+    from .pipeline import rediagnose
+
+    return asyncio.run(rediagnose(args))
+
+
 def _cmd_score(args: argparse.Namespace) -> int:
     from .score import score
 
@@ -96,6 +102,8 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument("--seed", type=int, default=0)
     scan.add_argument("--fresh", action="store_true", help="bypass the disk cache on read")
     scan.add_argument("--no-judge2", dest="no_judge2", action="store_true")
+    scan.add_argument("--no-diagnose", dest="no_diagnose", action="store_true",
+                      help="skip the diagnose stage (hunters' own diagnoses stand)")
     scan.add_argument(
         "--judge-mode", dest="judge_mode", choices=["advisory", "gate"], default="advisory",
         help="advisory (default): the judge annotates, nothing is removed; gate: judge kills are removed from the scored set",
@@ -129,6 +137,24 @@ def build_parser() -> argparse.ArgumentParser:
     rejudge.add_argument("--fresh", action="store_true", help="bypass the disk cache on read")
     rejudge.add_argument("--out", default="runs")
     rejudge.set_defaults(handler=_cmd_rejudge)
+
+    rediag = sub.add_parser(
+        "rediagnose", help="re-read each candidate's cited region cold and replace its diagnosis (no re-hunt)"
+    )
+    rediag.add_argument("run_dir")
+    rediag.add_argument("--kb", default="kb")
+    rediag.add_argument("--known", default=None)
+    rediag.add_argument("--notes", default=None)
+    rediag.add_argument("--scope-profile", dest="scope_profile", choices=["contest", "bounty"], default="contest")
+    rediag.add_argument("--scope-rules", dest="scope_rules", default=None)
+    rediag.add_argument("--judge-mode", dest="judge_mode", choices=["advisory", "gate"], default="advisory")
+    rediag.add_argument("--judge-budget", dest="judge_budget", type=int, default=120_000)
+    rediag.add_argument("--map-cap", dest="map_cap", type=int, default=12_000)
+    rediag.add_argument("--max-judge", dest="max_judge", type=int, default=40)
+    rediag.add_argument("--no-judge2", dest="no_judge2", action="store_true")
+    rediag.add_argument("--fresh", action="store_true")
+    rediag.add_argument("--out", default="runs")
+    rediag.set_defaults(handler=_cmd_rediagnose)
 
     score = sub.add_parser("score", help="score a run against a ground-truth file")
     score.add_argument("run_dir")

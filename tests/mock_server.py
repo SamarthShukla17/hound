@@ -69,6 +69,20 @@ HUNT_REPLY = {
     ]
 }
 
+DIAGNOSE_REPLY = {
+    "defect_found": True,
+    "title": "Re-entrancy window in withdraw",
+    "severity": "high",
+    "bug_class": "reentrancy",
+    "observation": "line 14 transfers ETH before line 15 updates balances",
+    "invariant": "the caller's balance must fall before control leaves the contract",
+    "violation": "a receiver re-entering withdraw at line 13 reads the stale balance",
+    "impact": "the vault pays out more than the caller deposited",
+    "exploit_steps": ["deposit", "re-enter from the receiver"],
+    "falsification": "check whether balances are written before the call",
+    "confidence": 0.7,
+}
+
 FALSIFY_REPLY = {
     "verdict": "keep",
     "reason": "no guard or modifier protects this path",
@@ -131,6 +145,8 @@ class _MockHandler(BaseHTTPRequestHandler):
             content = _wrap(json.dumps(MAP_REPLY), as_json=True)
         elif "TASK: HUNT" in user_content:
             content = _wrap(json.dumps(HUNT_REPLY), as_json=True)
+        elif "TASK: DIAGNOSE" in user_content:
+            content = _wrap(json.dumps(DIAGNOSE_REPLY), as_json=True)
         elif "TASK: FALSIFY" in user_content:
             content = _wrap(json.dumps(FALSIFY_REPLY), as_json=True)
         elif "TASK: SCORE" in user_content:

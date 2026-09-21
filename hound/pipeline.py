@@ -12,14 +12,14 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-from .agents import hunter, judge, mapper, poc
+from .agents import diagnose, hunter, judge, mapper, poc
 from .codebase import build_provenance, check_provenance, chunk, load, rel_path
 from .knowledge import load_kb, poc_refs, select
 from .llm import OutOfCredits, Router, parse_cache_any_model
 from .runs import CITATION_GATE, STALE_CITATION, is_hard_kill, read_findings, write_findings
 from .scope import DEFAULT_PROFILE, resolve_scope
 from .schema import SEV_RANK, Verdict
-from .verify import dedup, judge_context, snippets, spans
+from .verify import _spans_overlap, dedup, judge_context, snippets, spans
 
 JUDGE_MODES = ("advisory", "gate")
 
@@ -104,6 +104,64 @@ def citation_gate(cands: list, current_files: list):
         else:
             queue.append(c)
     return queue, hard
+
+
+def group_regions(cands: list, files: list) -> list:
+    """Group candidates whose cited spans overlap in the same file.
+
+    Diagnosis is per REGION, not per candidate: several candidates on one line range are
+    several guesses about the same code, and re-reading that code once is both cheaper and
+    more consistent than reading it N times. Returns [(location, [candidate, ...]), ...].
+    """
+    regions = []
+    for c in cands:
+        c_spans = spans(c["location"], files)
+        for region in regions:
+            if any(_spans_overlap(c_spans, spans(o["location"], files)) for o in region):
+                region.append(c)
+                break
+        else:
+            regions.append([c])
+    return [(members[0]["location"], members) for members in regions]
+
+
+async def run_diagnosis(router, kb, cands, files, *, judge_budget, map_text, scope, notes) -> int:
+    """Re-read each cited region cold and replace the located diagnosis with what is actually
+    there. The locating pass's root_cause/impact are preserved as hunter_claim, never shown to
+    the diagnoser. Returns the number of candidates whose diagnosis was replaced."""
+    regions = group_regions(cands, files)
+    print(f"diagnosing {len(regions)} region(s) covering {len(cands)} candidate(s)")
+
+    results = await asyncio.gather(*(
+        diagnose(
+            router, kb, judge_context(loc, files, judge_budget), loc,
+            pmap=map_text, scope=scope, notes=notes, cache_salt=_cited_salt(members[0]),
+        )
+        for loc, members in regions
+    ))
+
+    replaced = 0
+    for (loc, members), data in zip(regions, results):
+        if not data:
+            continue
+        for c in members:
+            c["hunter_claim"] = {k: c.get(k, "") for k in
+                                 ("title", "severity", "observation", "invariant", "violation", "root_cause", "impact")}
+            c["diagnosed"] = True
+            c["defect_found"] = bool(data.get("defect_found", True))
+            for field in ("observation", "invariant", "violation", "impact", "title", "bug_class",
+                          "exploit_steps", "falsification"):
+                if data.get(field):
+                    c[field] = data[field]
+            if data.get("severity") in SEV_RANK:
+                c["severity"] = data["severity"]
+            c["root_cause"] = " | ".join(
+                str(data.get(k, "")) for k in ("observation", "invariant", "violation") if data.get(k)
+            ) or c.get("root_cause", "")
+            if not c["defect_found"]:
+                c["impact"] = data.get("impact") or "diagnosis found no invariant violation at these lines"
+            replaced += 1
+    return replaced
 
 
 def verify_disproofs(verdicts: dict, files: list) -> int:
@@ -326,6 +384,16 @@ async def _scan(args) -> int:
     current_files, _ = load(args.target, scope_globs)
     queue, verdicts = citation_gate(deduped, current_files)
     hard_ids = set(verdicts)
+
+    # --- DIAGNOSE ---
+    # Hunters locate; this stage decides what is actually wrong. Runs on candidates that
+    # survived the deterministic gates, before any judge budget is spent on them.
+    if queue and not getattr(args, "no_diagnose", False):
+        replaced = await run_diagnosis(
+            router, kb, queue, files, judge_budget=args.judge_budget,
+            map_text=map_text, scope=scope, notes=notes_text,
+        )
+        print(f"diagnosis replaced {replaced}/{len(queue)} candidate diagnoses")
 
     # --- JUDGE QUEUE ---
     queue, overflow_verdicts = judge_queue(queue, args.max_judge)
@@ -591,6 +659,104 @@ async def _rejudge(args) -> int:
         _render_report(provenance["target"], out, verdicts, files, judge_mode, hard_ids)
     )
 
+    counts = _verdict_counts(out, verdicts, hard_ids)
+    print(f"judge verdicts ({judge_mode}): keep={counts['keep']} kill={counts['kill']} needs_poc={counts['needs_poc']}")
+    print(f"wrote {run_dir}")
+    print(json.dumps(router.report(), indent=2))
+    return 0
+
+
+async def rediagnose(args) -> int:
+    """Re-read every candidate's cited region cold, replace the located diagnosis, re-judge,
+    and write a new run dir. No re-hunt: locating is the expensive half and is unchanged."""
+    try:
+        return await _rediagnose(args)
+    except OutOfCredits as exc:
+        print(f"{ABORT_MESSAGE}: {exc}")
+        return 2
+
+
+async def _rediagnose(args) -> int:
+    src_dir = Path(args.run_dir)
+    try:
+        meta, findings = read_findings(src_dir)
+        map_doc = json.loads((src_dir / "map.json").read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"rediagnose: cannot read the run: {exc}")
+        return 1
+
+    provenance = meta.get("provenance")
+    if not provenance:
+        print("rediagnose: this run predates provenance, so the code it read can't be verified; re-scan instead")
+        return 1
+    problems = check_provenance(provenance)
+    if problems:
+        print("rediagnose REFUSED: the working tree no longer matches what the hunter read:")
+        for p in problems:
+            print(f"  - {p}")
+        return 1
+
+    try:
+        scope = resolve_scope(getattr(args, "scope_profile", DEFAULT_PROFILE), getattr(args, "scope_rules", None))
+    except (OSError, ValueError) as exc:
+        print(f"scope rules: {exc}")
+        return 1
+
+    kb = load_kb(args.kb)
+    known_text = _read_text_or_empty(args.known)
+    notes_text = _read_text_or_empty(args.notes)
+    files, _ = load(provenance["target"], meta.get("scope_globs"))
+    merged_map = map_doc.get("map") if isinstance(map_doc, dict) else None
+    map_text = _map_text(merged_map, args.map_cap) if isinstance(merged_map, dict) and "summary" in merged_map else ""
+
+    carried_hard = {f["id"] for f in findings if is_hard_kill(f)}
+    verdicts = {f["id"]: Verdict(**f["verdict"]) for f in findings if f["id"] in carried_hard}
+    live = [dict(f) for f in findings if f["id"] not in carried_hard]
+    queue, new_hard = citation_gate(live, files)
+    verdicts.update(new_hard)
+    hard_ids = carried_hard | set(new_hard)
+
+    router = Router(
+        models_path=args.models, local_only=args.local_only, seed=meta.get("seed", 0), fresh=args.fresh,
+        cache_any_model=parse_cache_any_model(getattr(args, "cache_any_model", None)),
+    )
+    replaced = await run_diagnosis(
+        router, kb, queue, files, judge_budget=args.judge_budget,
+        map_text=map_text, scope=scope, notes=notes_text,
+    )
+    print(f"diagnosis replaced {replaced}/{len(queue)} candidate diagnoses")
+
+    judge_mode = getattr(args, "judge_mode", "advisory")
+    queue, overflow = judge_queue(queue, args.max_judge)
+    verdicts.update(overflow)
+    contexts = {c["id"]: judge_context(c["location"], files, args.judge_budget) for c in queue}
+    verdicts.update(
+        await run_judges(
+            router, kb, queue, contexts, map_text=map_text, known=known_text, killed="",
+            notes=notes_text, scope=scope, no_judge2=args.no_judge2, files=files,
+        )
+    )
+
+    run_dir = Path(args.out) / (datetime.now().strftime("%Y%m%d-%H%M%S") + "-diagnosed")
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "map.json").write_text(json.dumps(map_doc, indent=2, sort_keys=True))
+
+    by_id = {c["id"]: c for c in live}
+    out = []
+    for f in findings:
+        entry = dict(by_id.get(f["id"], f))
+        entry.pop("poc_path", None)
+        entry["verdict"] = verdicts[f["id"]].model_dump()
+        entry["hard_kill"] = f["id"] in hard_ids
+        out.append(entry)
+    write_findings(
+        run_dir, judge_mode, provenance, out, scope=scope.as_dict(), seed=meta.get("seed", 0),
+        lenses=meta.get("lenses"), passes=meta.get("passes"), scope_globs=meta.get("scope_globs"),
+        map_ok=meta.get("map_ok"), lens_stats=meta.get("lens_stats"), diagnosed_from=str(src_dir),
+    )
+    (run_dir / "report.md").write_text(
+        _render_report(provenance["target"], out, verdicts, files, judge_mode, hard_ids)
+    )
     counts = _verdict_counts(out, verdicts, hard_ids)
     print(f"judge verdicts ({judge_mode}): keep={counts['keep']} kill={counts['kill']} needs_poc={counts['needs_poc']}")
     print(f"wrote {run_dir}")
