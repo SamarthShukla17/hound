@@ -29,7 +29,9 @@ providers:
     base_url: https://openrouter.ai/api/v1
     key_env: OPENROUTER_API_KEY
     rpm: 18
-    concurrency: 2
+    # 6, not 2: scoring is 46+ calls per run and latency per call (43-630s, driven by variable
+    # reasoning length) does not improve with waiting. Raised for throughput on the scorer.
+    concurrency: 6
     # 300s, not 120s: a whole-run scoring call (every candidate x every ground-truth bug) on a
     # mandatory-reasoning model exceeds 120s of generation. Hunter/judge calls run 15-150s, so
     # the only cost is that a genuinely stalled call takes longer to detect.
