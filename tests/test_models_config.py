@@ -69,10 +69,14 @@ def test_role_max_tokens_are_positive_ints_for_known_roles():
         assert isinstance(value, int) and value > 0
 
 
-def test_judge_and_scorer_have_the_large_reasoning_budget():
-    """Mandatory-reasoning models spend the completion budget thinking before emitting any
-    content. The scorer needs the most: one call grades EVERY candidate against EVERY
-    ground-truth bug, and 25 candidates x 23 bugs overflowed 24000."""
+def test_judges_have_the_large_reasoning_budget_but_the_scorer_no_longer_does():
+    """Mandatory-reasoning models spend the completion budget thinking before emitting content,
+    so the judges keep a large ceiling.
+
+    The scorer's 60000 belonged to the OLD design, where one call graded every candidate against
+    every ground-truth bug. Scoring is per-bug now — one bug, a ~3k prompt — so the huge ceiling
+    stopped being headroom and became a hazard: twice a model spent all 60000 tokens reasoning
+    and returned nothing, at 186s and $0.018 per silent failure."""
     caps = load_models_config()["max_tokens"]
     assert caps["judge"] == 24000 and caps["judge2"] == 24000
-    assert caps["scorer"] >= 60000
+    assert caps["scorer"] == 8000

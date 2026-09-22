@@ -456,15 +456,24 @@ class Router:
                 last_error = error
                 continue
 
-            text = strip_think(text)
+            # A reply cut off mid-reasoning has an OPENED but unclosed <think>, which _THINK_RE
+            # (which requires the closing tag) leaves untouched — so raw chain-of-thought would
+            # otherwise flow on as if it were the answer. Treat that as no answer at all.
+            unterminated_think = "<think>" in text and "</think>" not in text
+            text = "" if unterminated_think else strip_think(text)
             if not text:
                 if meta and meta["truncated"]:
+                    # Truncated AND nothing survived strip_think: the whole budget went to hidden
+                    # reasoning and the model never began its answer. This is NOT the ordinary
+                    # "answer was cut off" case, and the fix is NOT a bigger ceiling — more room
+                    # just buys more reasoning. Logged distinctly so the two never get confused.
                     print(
-                        f"[llm] TRUNCATED BY max_tokens: {model}, raise max_tokens for role {role} "
-                        f"(used {meta['completion_tokens']}/{resolved_max_tokens}, "
-                        f"finish_reason={meta['finish_reason']})"
+                        f"[llm] REASONING-ONLY BURN: {model} for role {role} spent "
+                        f"{meta['completion_tokens']}/{resolved_max_tokens} completion tokens "
+                        f"entirely inside <think> and returned no answer "
+                        f"(finish_reason={meta['finish_reason']}). Do not raise max_tokens for this."
                     )
-                    last_error = RuntimeError("truncated by max_tokens")
+                    last_error = RuntimeError("reasoning-only burn: no answer within max_tokens")
                 else:
                     print(f"[llm] {provider.name}/{model} returned an empty reply for role {role!r}")
                     last_error = RuntimeError("empty reply")

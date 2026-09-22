@@ -229,10 +229,15 @@ def test_max_tokens_precedence_target_over_role_map_over_default(tmp_path, monke
     assert sent["max_tokens"] == 9
 
 
-def test_empty_reply_at_the_token_cap_is_reported_as_truncation(models_yaml, monkeypatch, capsys):
+def test_budget_spent_entirely_inside_think_is_a_reasoning_only_burn(models_yaml, monkeypatch, capsys):
+    """The observed scorer failure: 60000/60000 completion tokens, all of it <think>, no answer.
+    It must NOT be reported as ordinary truncation, because the remedy is the opposite — a
+    bigger ceiling buys more reasoning, not more answer."""
     router = Router(models_path=str(models_yaml), fresh=True)
 
     async def fake_complete(self, *, model, messages, temperature, max_tokens, extra=None, **kw):
+        # the shape actually observed: the provider carried reasoning on its own channel and
+        # handed back an EMPTY content with finish_reason=length
         return _resp("", completion_tokens=max_tokens, finish_reason="length")
 
     monkeypatch.setattr(Provider, "complete", fake_complete)
@@ -240,8 +245,45 @@ def test_empty_reply_at_the_token_cap_is_reported_as_truncation(models_yaml, mon
         asyncio.run(router.chat("test_role", "s", "u", max_tokens=100))
 
     out = capsys.readouterr().out
-    assert "TRUNCATED BY max_tokens: enabled-model, raise max_tokens for role test_role" in out
+    assert "REASONING-ONLY BURN" in out
+    assert "100/100 completion tokens" in out
+    assert "Do not raise max_tokens" in out
     assert "returned an empty reply" not in out
+
+
+def test_reply_cut_off_mid_reasoning_is_also_a_burn_not_an_answer(models_yaml, monkeypatch, capsys):
+    """An unclosed <think> is what truncation mid-reasoning looks like. _THINK_RE only matches
+    a CLOSED block, so without the guard the raw chain-of-thought would be returned as the
+    model's answer."""
+    router = Router(models_path=str(models_yaml), fresh=True)
+
+    async def fake_complete(self, *, model, messages, temperature, max_tokens, extra=None, **kw):
+        return _resp("<think>weighing the candidates " * 9, completion_tokens=max_tokens, finish_reason="length")
+
+    monkeypatch.setattr(Provider, "complete", fake_complete)
+    with pytest.raises(RuntimeError):
+        asyncio.run(router.chat("test_role", "s", "u", max_tokens=100))
+
+    out = capsys.readouterr().out
+    assert "REASONING-ONLY BURN" in out
+    assert "weighing the candidates" not in out  # reasoning never surfaces as an answer
+
+
+def test_a_partially_written_answer_at_the_cap_is_ordinary_truncation(models_yaml, monkeypatch, capsys):
+    """The other mode: the model DID start answering and got cut off. Distinct message, and the
+    partial text is still returned to the caller."""
+    router = Router(models_path=str(models_yaml), fresh=True)
+
+    async def fake_complete(self, *, model, messages, temperature, max_tokens, extra=None, **kw):
+        return _resp("<think>brief</think>{\"partial\": tru", completion_tokens=max_tokens, finish_reason="length")
+
+    monkeypatch.setattr(Provider, "complete", fake_complete)
+    text = asyncio.run(router.chat("test_role", "s", "u", max_tokens=100))
+
+    out = capsys.readouterr().out
+    assert "TRUNCATED BY max_tokens" in out
+    assert "REASONING-ONLY BURN" not in out
+    assert text == '{"partial": tru'  # partial answer handed back, just never cached
 
 
 def test_empty_reply_well_under_the_cap_is_a_plain_empty_reply(models_yaml, monkeypatch, capsys):

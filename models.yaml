@@ -29,9 +29,11 @@ providers:
     base_url: https://openrouter.ai/api/v1
     key_env: OPENROUTER_API_KEY
     rpm: 18
-    # 6, not 2: scoring is 46+ calls per run and latency per call (43-630s, driven by variable
-    # reasoning length) does not improve with waiting. Raised for throughput on the scorer.
-    concurrency: 6
+    # 3, not 6: at 6 the provider returned climbing status=None transport errors and 429s
+    # (15 backoffs in one scoring pass), which cost more wall-clock in retries than the extra
+    # slots bought. 3 is the measured stable point. Concurrency is a rate knob only — it does
+    # not change any result, so changing it mid-chain keeps runs comparable.
+    concurrency: 3
     # 300s, not 120s: a whole-run scoring call (every candidate x every ground-truth bug) on a
     # mandatory-reasoning model exceeds 120s of generation. Hunter/judge calls run 15-150s, so
     # the only cost is that a genuinely stalled call takes longer to detect.
@@ -77,7 +79,11 @@ max_tokens:
   judge2: 24000
   diagnose: 24000
   poc: 8000
-  scorer: 60000
+  # 8000, not 60000: a grading call carries ONE bug and a ~3k prompt, so a well-behaved reply
+  # is a few hundred tokens. At 60000 a reasoning model twice spent the entire budget inside
+  # <think> and returned an empty string — 186s and $0.018 for nothing. Raising the ceiling
+  # feeds that failure; capping it turns a silent 3-minute burn into a fast, visible one.
+  scorer: 8000
 
 # Reasoning is switched off where the provider supports it, via `extra` (passed straight to
 # the SDK call):
