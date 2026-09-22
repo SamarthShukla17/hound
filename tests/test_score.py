@@ -220,24 +220,25 @@ def test_each_repeat_uses_a_distinct_cache_salt_so_it_actually_re_samples(run_di
 
 
 def test_the_majority_verdict_wins(run_dir, fake_router, monkeypatch):
-    calls = {"n": 0}
+    """Votes keyed off the attempt in the salt, not a call counter: the calls run
+    concurrently, so completion order is not deterministic."""
 
-    async def two_exact_one_miss(self, role, system, user, **kw):
+    async def miss_on_attempt_1(self, role, system, user, *, cache_salt="", **kw):
         type(self).calls += 1
         self.call_log.append({"role": role, "model": type(self).answered_by})
         if "H-01" not in user:
             return {"verdict": "MISS", "finding_id": None, "why": "w"}
-        calls["n"] += 1
-        return ({"verdict": "EXACT", "finding_id": "F001", "why": "w"} if calls["n"] <= 2
-                else {"verdict": "MISS", "finding_id": None, "why": "w"})
+        attempt = cache_salt.rsplit("#", 1)[-1]
+        if attempt == "1":
+            return {"verdict": "MISS", "finding_id": None, "why": "w"}
+        return {"verdict": "EXACT", "finding_id": "F001", "why": "w"}
 
-    monkeypatch.setattr(FakeScorerRouter, "chat_json", two_exact_one_miss)
+    monkeypatch.setattr(FakeScorerRouter, "chat_json", miss_on_attempt_1)
     assert _run(run_dir, repeats=3) == 0
 
     result = json.loads((run_dir[0] / "score.json").read_text())
     h01 = next(s for s in result["scores"] if s["gt_id"] == "H-01")
-    # 2 EXACT vs 1 MISS: the majority stands, and a 4th call broke the tie
-    assert h01["verdict"] == "EXACT"
+    assert h01["verdict"] == "EXACT"                     # 2 EXACT (attempts 0,2) vs 1 MISS
     assert h01["votes"].count("EXACT") > h01["votes"].count("MISS")
 
 
