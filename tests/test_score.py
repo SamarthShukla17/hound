@@ -8,7 +8,9 @@ import textwrap
 
 import pytest
 
-from hound.score import _candidate_summary, score, select_scored, union_scores
+from hound.score import (
+    _candidate_summary, bug_locations, candidates_for_bug, score, select_scored, union_scores,
+)
 from tests.mock_server import MockServer
 
 
@@ -33,7 +35,8 @@ def _models_yaml(base_url: str) -> str:
 
 
 def _score_args(**overrides) -> argparse.Namespace:
-    defaults = dict(run_dir=None, truth=None, include_killed=False, models=None, local_only=False)
+    defaults = dict(run_dir=None, truth=None, include_killed=False, models=None, local_only=False,
+                    repeats=None, pass_id=None, as_gate=False)
     defaults.update(overrides)
     return argparse.Namespace(**defaults)
 
@@ -233,8 +236,9 @@ def test_the_majority_verdict_wins(run_dir, fake_router, monkeypatch):
 
     result = json.loads((run_dir[0] / "score.json").read_text())
     h01 = next(s for s in result["scores"] if s["gt_id"] == "H-01")
-    assert h01["verdict"] == "EXACT" and h01["agreement"] == "2/3"
-    assert result["agreement"]["H-01"] == "2/3"
+    # 2 EXACT vs 1 MISS: the majority stands, and a 4th call broke the tie
+    assert h01["verdict"] == "EXACT"
+    assert h01["votes"].count("EXACT") > h01["votes"].count("MISS")
 
 
 def test_agreement_is_recorded_per_bug(run_dir, fake_router):
@@ -535,3 +539,93 @@ def test_the_scorer_is_told_that_any_claim_matching_counts(run_dir, tmp_path, mo
     assert "ALTERNATE CLAIMS" in flat
     assert "If ANY of them names the ground-truth defect, that is a match" in flat
     assert "an earlier pass's explanation that a later one replaced" in flat
+
+
+# --- per-bug candidate filter -----------------------------------------------------------------
+
+GT_WITH_LOC = "### M-10 - A bug\nhttps://example/contracts/Vault.sol#L216-L235\nText."
+
+
+def _cand(fid, loc):
+    return {"id": fid, "location": loc}
+
+
+def test_bug_locations_parses_every_source_link():
+    assert bug_locations(GT_WITH_LOC) == [("Vault.sol", 216, 235)]
+    assert bug_locations("no links here") == []
+
+
+def test_only_candidates_near_the_bug_are_graded_against_it():
+    """Sending every candidate for every bug is what pushed a per-bug call back over the token
+    cap; a candidate in another file cannot be the same defect."""
+    cands = [_cand("F1", "Vault.sol:220-230"), _cand("F2", "Other.sol:220"),
+             _cand("F3", "Vault.sol:900"), _cand("F4", "Vault.sol:270")]
+    subset, why = candidates_for_bug(GT_WITH_LOC, cands)
+    assert [c["id"] for c in subset] == ["F1", "F4"]   # F4 is within +/-60 of 216-235
+    assert "near" in why
+
+
+def test_it_widens_to_the_whole_file_rather_than_returning_nothing():
+    """An over-narrow filter would manufacture MISSes."""
+    subset, why = candidates_for_bug(GT_WITH_LOC, [_cand("F3", "Vault.sol:900")])
+    assert [c["id"] for c in subset] == ["F3"]
+    assert "same file" in why
+
+
+def test_it_falls_back_to_every_candidate_when_none_cite_that_file():
+    subset, why = candidates_for_bug(GT_WITH_LOC, [_cand("F2", "Other.sol:1")])
+    assert [c["id"] for c in subset] == ["F2"]
+    assert "none cite this file" in why
+
+
+def test_a_bug_with_no_parseable_location_grades_against_everything():
+    cands = [_cand("F1", "Vault.sol:1"), _cand("F2", "Other.sol:1")]
+    subset, why = candidates_for_bug("### M-99 - No link here\nText.", cands)
+    assert len(subset) == 2 and "no parseable bug location" in why
+
+
+# --- pass id and adaptive repeats ---------------------------------------------------------------
+
+
+def test_a_pass_id_changes_the_cache_key_so_a_repeat_pass_re_samples(run_dir, fake_router):
+    """Without this, re-scoring the same run replays the previous pass's cached answers and
+    'reproducibility' is measuring the cache."""
+    _run(run_dir, repeats=1, pass_id="p1")
+    first = [c["salt"] for c in fake_router.seen]
+    FakeScorerRouter.seen = []
+    _run(run_dir, repeats=1, pass_id="p2")
+    second = [c["salt"] for c in fake_router.seen]
+
+    assert all(sa.startswith("p1:") for sa in first)
+    assert all(sa.startswith("p2:") for sa in second)
+    assert not set(first) & set(second)
+
+
+def test_two_agreeing_calls_cost_only_two(run_dir, fake_router):
+    fake_router.per_bug = {"H-01": {"verdict": "EXACT", "finding_id": "F001", "why": "w"}}
+    assert _run(run_dir, repeats=2) == 0
+    assert fake_router.calls == 2 * 2   # 2 bugs x 2 calls, no tie-breaks
+    result = json.loads((run_dir[0] / "score.json").read_text())
+    assert result["agreement"]["H-01"] == "2/2"
+
+
+def test_a_disagreement_buys_exactly_one_tie_breaker(run_dir, fake_router, monkeypatch, capsys):
+    seq = {"n": 0}
+
+    async def disagree_on_h01(self, role, system, user, **kw):
+        type(self).calls += 1
+        self.call_log.append({"role": role, "model": type(self).answered_by})
+        if "H-01" not in user:
+            return {"verdict": "MISS", "finding_id": None, "why": "w"}
+        seq["n"] += 1
+        return ({"verdict": "EXACT", "finding_id": "F001", "why": "w"} if seq["n"] != 2
+                else {"verdict": "MISS", "finding_id": None, "why": "w"})
+
+    monkeypatch.setattr(FakeScorerRouter, "chat_json", disagree_on_h01)
+    assert _run(run_dir, repeats=2) == 0
+
+    assert "tie-breaking 1 contested bug(s): H-01" in capsys.readouterr().out
+    assert fake_router.calls == 5          # 2 bugs x 2, plus ONE tie-break
+    result = json.loads((run_dir[0] / "score.json").read_text())
+    h01 = next(s for s in result["scores"] if s["gt_id"] == "H-01")
+    assert h01["verdict"] == "EXACT" and h01["agreement"] == "2/3"

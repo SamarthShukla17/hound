@@ -6,9 +6,12 @@ import re
 from collections import Counter
 from pathlib import Path
 
+import os
+
 from .codebase import check_provenance
 from .llm import OutOfCredits, Router
 from .runs import is_hard_kill, read_findings
+from .verify import parse_locations
 
 RETRY_DELAY_SECONDS = 30
 # Per-bug calls are small, but reasoning still runs long; generous since the run is finished.
@@ -20,7 +23,9 @@ DEGENERATE_MIN_SCORES = 3
 # a +/-4.4 point swing, larger than most effects being measured. A per-bug call has a far
 # smaller reasoning surface, and repeating it turns residual nondeterminism into a measurable
 # agreement number instead of silent noise.
-SCORE_REPEATS = 3
+SCORE_REPEATS = 2          # a 3rd call only breaks a tie
+MAX_REPEATS = 3
+CANDIDATE_PAD = 60         # lines either side of a bug's own location
 
 SYSTEM_PROMPT = """You are grading a smart-contract audit tool against ONE bug from a ground-truth
 answer key.
@@ -49,6 +54,54 @@ Never invent an id.
 
 Output ONLY this JSON shape:
 {"verdict": "EXACT|PARTIAL|MISS", "finding_id": "<an id from CANDIDATE FINDINGS, or null>", "why": "..."}"""
+
+
+_GT_LOC_RE = re.compile(r"(\w+\.(?:sol|rs|vy|move|cairo|go))#L(\d+)(?:-#?L?(\d+))?")
+
+
+def bug_locations(gt_text: str) -> list:
+    """(file, start, end) for every source link in a ground-truth entry."""
+    out = []
+    for m in _GT_LOC_RE.finditer(gt_text):
+        a = int(m.group(2))
+        out.append((m.group(1), a, int(m.group(3) or a)))
+    return out
+
+
+def candidates_for_bug(gt_text: str, candidates: list, pad: int = CANDIDATE_PAD) -> tuple:
+    """The candidates worth grading against ONE bug, and why that many.
+
+    Sending all candidates for every bug is what pushed a per-bug call back over the token
+    cap. A candidate citing a different file cannot be the same defect, so narrow to the
+    bug's own file within +/-pad lines, widening rather than ever returning nothing: an
+    over-narrow filter would manufacture MISSes.
+    """
+    locs = bug_locations(gt_text)
+    if not locs:
+        return candidates, "all (no parseable bug location)"
+
+    near, same_file = [], []
+    for c in candidates:
+        cited = parse_locations(c.get("location", "") or "")
+        matched_file = matched_near = False
+        for path, x, y in cited:
+            fname = os.path.basename(path)
+            for gfile, ga, gb in locs:
+                if fname != gfile:
+                    continue
+                matched_file = True
+                if not (y + pad < ga or gb + pad < x):
+                    matched_near = True
+        if matched_near:
+            near.append(c)
+        elif matched_file:
+            same_file.append(c)
+
+    if near:
+        return near, f"{len(near)} near (+/-{pad} lines)"
+    if same_file:
+        return same_file, f"{len(same_file)} in the same file"
+    return candidates, f"all {len(candidates)} (none cite this file)"
 
 
 _GT_ENTRY_RE = re.compile(r"^### ([HM]-\d+)\s*[-—]\s*(.+)$", re.M)
@@ -171,7 +224,8 @@ def scorer_fallback_error(router) -> str:
     return ""
 
 
-async def _score_one_call(router, gt_id: str, gt_text: str, candidates_json: str, attempt: int) -> dict:
+async def _score_one_call(router, gt_id: str, gt_text: str, candidates_json: str, attempt: int,
+                          pass_id: str = "") -> dict:
     """One grading call for ONE bug. Retried once on a 429; 402 aborts the whole run."""
     user = (
         "TASK: SCORE\n\n"
@@ -185,7 +239,7 @@ async def _score_one_call(router, gt_id: str, gt_text: str, candidates_json: str
                 ceiling=SCORER_CALL_CEILING,
                 # Repeats must actually re-sample: without a distinct salt every repeat is one
                 # cache hit and the "majority" is one opinion counted three times.
-                cache_salt=f"{gt_id}#{attempt}",
+                cache_salt=f"{pass_id}:{gt_id}#{attempt}" if pass_id else f"{gt_id}#{attempt}",
             )
         except OutOfCredits:
             raise
@@ -213,22 +267,40 @@ def majority(votes: list) -> tuple:
     return top, f"{n}/{len(votes)}", (Counter(ids).most_common(1)[0][0] if ids else None)
 
 
-async def score_all_bugs(router, gt_entries: dict, candidates: list, repeats: int = SCORE_REPEATS):
-    """One call per ground-truth bug, repeated `repeats` times, majority wins.
+async def score_all_bugs(router, gt_entries: dict, candidates: list, repeats: int = SCORE_REPEATS,
+                         pass_id: str = ""):
+    """One call per ground-truth bug, repeated, majority wins.
 
-    Provider concurrency bounds how many run at once (openrouter: 2).
+    Runs `repeats` calls per bug and only pays for a third when those disagree, so a bug the
+    grader is confident about costs two calls and a contested one costs three.
     """
-    candidates_json = json.dumps(candidates, indent=2, sort_keys=True)
-    jobs = [(gid, attempt) for gid in sorted(gt_entries) for attempt in range(repeats)]
-    print(f"scoring {len(gt_entries)} ground-truth bugs x {repeats} repeats = {len(jobs)} calls")
+    payloads, why = {}, {}
+    for gid, text in gt_entries.items():
+        subset, reason = candidates_for_bug(text, candidates)
+        payloads[gid] = json.dumps(subset, indent=2, sort_keys=True)
+        why[gid] = reason
+    for gid in sorted(gt_entries):
+        print(f"  {gid}: grading against {why[gid]}")
 
-    results = await asyncio.gather(*(
-        _score_one_call(router, gid, gt_entries[gid], candidates_json, attempt) for gid, attempt in jobs
-    ))
+    async def run(gid, attempt):
+        return await _score_one_call(router, gid, gt_entries[gid], payloads[gid], attempt, pass_id)
+
+    jobs = [(gid, a) for gid in sorted(gt_entries) for a in range(repeats)]
+    print(f"scoring {len(gt_entries)} bugs x {repeats} repeats = {len(jobs)} calls (3rd only on a tie)")
+    results = await asyncio.gather(*(run(gid, a) for gid, a in jobs))
 
     by_bug = {}
     for (gid, _), res in zip(jobs, results):
         by_bug.setdefault(gid, []).append(res if isinstance(res, dict) else {"verdict": None, "failed": True})
+
+    # tie-break only where the first calls disagree
+    contested = [gid for gid, votes in by_bug.items()
+                 if len({v.get("verdict") for v in votes if not v.get("failed")}) > 1]
+    if contested:
+        print(f"tie-breaking {len(contested)} contested bug(s): {', '.join(sorted(contested))}")
+        extra = await asyncio.gather(*(run(gid, repeats) for gid in contested))
+        for gid, res in zip(contested, extra):
+            by_bug[gid].append(res if isinstance(res, dict) else {"verdict": None, "failed": True})
 
     ungradeable = [gid for gid, votes in by_bug.items() if all(v.get("failed") for v in votes)]
     if ungradeable:
@@ -242,9 +314,10 @@ async def score_all_bugs(router, gt_entries: dict, candidates: list, repeats: in
         votes = [v for v in by_bug[gid] if not v.get("failed")]
         verdict, agreement, fid = majority(votes)
         agreements[gid] = agreement
-        why = next((v.get("why", "") for v in votes if v.get("verdict") == verdict), "")
+        why_text = next((v.get("why", "") for v in votes if v.get("verdict") == verdict), "")
         scores.append({"gt_id": gid, "verdict": verdict, "finding_id": fid,
-                       "why": why, "agreement": agreement,
+                       "why": why_text, "agreement": agreement,
+                       "candidates_considered": why[gid],
                        "votes": [v.get("verdict") for v in votes]})
     return scores, agreements
 
@@ -318,7 +391,9 @@ async def score(args) -> int:
     router = None
     try:
         router = Router(models_path=args.models, local_only=args.local_only)
-        scores, agreements = await score_all_bugs(router, gt_entries, candidates, repeats)
+        scores, agreements = await score_all_bugs(
+            router, gt_entries, candidates, repeats, pass_id=getattr(args, "pass_id", "") or ""
+        )
     except OutOfCredits as exc:
         print(f"OUT OF CREDITS — run aborted: {exc}")
         return 2

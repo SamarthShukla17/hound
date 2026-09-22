@@ -161,6 +161,9 @@ def build_parser() -> argparse.ArgumentParser:
     score.add_argument("truth")
     score.add_argument("--include-killed", dest="include_killed", action="store_true",
                        help="score every finding, including those removed by deterministic gates")
+    score.add_argument("--pass-id", dest="pass_id", default=None,
+                       help="tag for this scoring pass; enters the cache key so a repeat pass re-samples "
+                            "instead of replaying the previous pass's answers")
     score.add_argument("--repeats", type=int, default=None,
                        help="grading repeats per ground-truth bug; majority wins (default 3)")
     score.add_argument("--as-gate", dest="as_gate", action="store_true",
