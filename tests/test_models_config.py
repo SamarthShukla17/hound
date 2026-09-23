@@ -31,12 +31,27 @@ def test_role_providers_exist():
 def test_only_the_intended_paid_model_is_active():
     config = load_models_config()
     active_models = {t["model"] for targets in config["roles"].values() for t in targets}
-    # gpt-5.6-luna and grok-4.6 stay commented out. Two paid models are active: glm-4.7-flash
-    # hunts (the only model measured to hunt productively) and glm-5.3-flash judges/scores.
+    # gpt-5.6-luna and grok-4.6 stay commented out. glm-4.7-flash hunts (the only model
+    # measured to hunt productively) and glm-5.3-flash judges/scores. claude-sonnet-5 and o3
+    # are SCORER FALLBACKS ONLY: both accounts are out of credit, so they cost nothing today
+    # and take over automatically if either is funded. Every entry is pinned by name.
     assert active_models <= {
         "glm-4.7-flash", "cohere/north-mini-code:free",
         "z-ai/glm-4.7-flash", "z-ai/glm-5.3-flash",
+        "claude-sonnet-5", "o3",
     }
+
+
+def test_the_paid_fallbacks_are_scorer_only_and_never_primary():
+    """Grading is the role where an unreliable answer invalidates everything else, so it is the
+    only role allowed a paid fallback -- and those must stay BELOW the primary, because an
+    unfunded account would otherwise abort every run on its first call."""
+    config = load_models_config()
+    for role, targets in config["roles"].items():
+        for position, t in enumerate(targets):
+            if t["model"] in ("claude-sonnet-5", "o3"):
+                assert role == "scorer", f"{role} must not use a paid frontier target"
+                assert position > 0, f"{t['model']} must not be the scorer's primary"
 
 
 def test_no_role_uses_a_random_model_router():
@@ -48,14 +63,21 @@ def test_no_role_uses_a_random_model_router():
             assert t["model"] != "openrouter/free", f"{role} uses the random free router"
 
 
-def test_judge_and_scorer_are_glm_5_3_flash_then_zai_fallback():
+def test_judge_is_glm_5_3_flash_then_zai_fallback():
     config = load_models_config()
-    for role in ("judge", "scorer"):
-        targets = config["roles"][role]
-        assert [(t["provider"], t["model"]) for t in targets] == [
-            ("openrouter", "z-ai/glm-5.3-flash"),
-            ("zai", "glm-4.7-flash"),
-        ]
+    assert [(t["provider"], t["model"]) for t in config["roles"]["judge"]] == [
+        ("openrouter", "z-ai/glm-5.3-flash"),
+        ("zai", "glm-4.7-flash"),
+    ]
+
+
+def test_scorer_leads_with_the_same_grader_and_keeps_zai_last():
+    """The primary must not drift: a run graded by a different model is not comparable to the
+    runs before it, which is what scorer_fallback_error exists to catch. zai stays LAST because
+    measurement put it at 140 backoffs / 243 429s against OpenRouter's 13 / 6 on one run."""
+    targets = [(t["provider"], t["model"]) for t in load_models_config()["roles"]["scorer"]]
+    assert targets[0] == ("openrouter", "z-ai/glm-5.3-flash")
+    assert targets[-1] == ("zai", "glm-4.7-flash")
 
 
 def test_hunter_max_tokens_is_20000():

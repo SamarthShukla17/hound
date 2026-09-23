@@ -148,12 +148,25 @@ roles:
     - {provider: openrouter, model: cohere/north-mini-code:free, extra: {extra_body: {reasoning: {enabled: false}}}}
     - {provider: zai, model: glm-4.7-flash, extra: {extra_body: {thinking: {type: disabled}}}}
 
+  # Grading is the one role where a missing or wrong answer invalidates everything else, and
+  # it is also the least reliable: measured 2026-09-23, roughly a third of scoring attempts
+  # failed on provider capacity. Switching to zai direct made it WORSE, not better (140
+  # backoffs / 243 429s vs OpenRouter's 13 / 6 on the same run, at concurrency 1), so the
+  # instability is free-tier quota, not one vendor.
+  # Anthropic and OpenAI sit below the current primary rather than above it: both keys
+  # authenticate but their accounts are out of credit (checked 2026-09-23), so promoting them
+  # would abort every run. As fallbacks they cost nothing while empty and start absorbing load
+  # the moment either account is funded -- no code change needed then.
   scorer:
     - {provider: openrouter, model: z-ai/glm-5.3-flash}
+    - {provider: anthropic, model: claude-sonnet-5}
+    - {provider: openai, model: o3}
     - {provider: zai, model: glm-4.7-flash, extra: {extra_body: {thinking: {type: disabled}}}}
 
 # $ per million tokens: [input, output]. Approximate — verify before trusting cost reports.
 prices:
+  claude-sonnet-5: [3.0, 15.0]
+  o3: [2.0, 8.0]
   cohere/north-mini-code:free: [0, 0]
   glm-4.7-flash: [0, 0]
   z-ai/glm-4.7-flash: [0.061, 0.400]
