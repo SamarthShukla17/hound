@@ -556,21 +556,36 @@ def test_bug_locations_parses_every_source_link():
     assert bug_locations("no links here") == []
 
 
-def test_only_candidates_near_the_bug_are_graded_against_it():
-    """Sending every candidate for every bug is what pushed a per-bug call back over the token
-    cap; a candidate in another file cannot be the same defect."""
+def test_every_candidate_in_the_bugs_file_is_graded_near_ones_first():
+    """Cross-file candidates are still excluded (they cannot be the same defect), but nothing
+    in the bug's own file is dropped -- see the M-02 regression test below for why."""
     cands = [_cand("F1", "Vault.sol:220-230"), _cand("F2", "Other.sol:220"),
              _cand("F3", "Vault.sol:900"), _cand("F4", "Vault.sol:270")]
     subset, why = candidates_for_bug(GT_WITH_LOC, cands)
-    assert [c["id"] for c in subset] == ["F1", "F4"]   # F4 is within +/-60 of 216-235
-    assert "near" in why
+    assert [c["id"] for c in subset] == ["F1", "F4", "F3"]  # near first, then the rest of the file
+    assert "F2" not in [c["id"] for c in subset]            # different file, cannot be this bug
+    assert "2 near" in why and "1 elsewhere in the file" in why
 
 
-def test_it_widens_to_the_whole_file_rather_than_returning_nothing():
+def test_a_far_candidate_is_graded_even_when_nearer_ones_exist():
+    """THE M-02 REGRESSION. Ground truth cites Marketplace.sol 413-422 and 459-471, but the fix
+    belongs at line 288 in listVesting(). Every run produced a candidate citing 276-288 and the
+    old filter discarded all of them, because other candidates happened to sit nearer the
+    citation. Measured on this bench, 9 of 11 located-but-misread bugs name a fix outside their
+    own cited range, so this is the common case, not an edge case."""
+    gt = "### M-02 - Discounted listings unpurchasable\nSecondSwap_Marketplace.sol#L459-L471"
+    fix_site = _cand("F9", "SecondSwap_Marketplace.sol:276-288")
+    cands = [_cand("F1", "SecondSwap_Marketplace.sol:459-471"), fix_site]
+
+    subset, _ = candidates_for_bug(gt, cands)
+    assert "F9" in [c["id"] for c in subset], "the candidate citing the actual fix site was dropped"
+
+
+def test_it_still_returns_a_lone_far_candidate_rather_than_nothing():
     """An over-narrow filter would manufacture MISSes."""
     subset, why = candidates_for_bug(GT_WITH_LOC, [_cand("F3", "Vault.sol:900")])
     assert [c["id"] for c in subset] == ["F3"]
-    assert "same file" in why
+    assert "0 near" in why
 
 
 def test_it_falls_back_to_every_candidate_when_none_cite_that_file():

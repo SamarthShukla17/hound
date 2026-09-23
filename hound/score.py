@@ -73,8 +73,19 @@ def candidates_for_bug(gt_text: str, candidates: list, pad: int = CANDIDATE_PAD)
 
     Sending all candidates for every bug is what pushed a per-bug call back over the token
     cap. A candidate citing a different file cannot be the same defect, so narrow to the
-    bug's own file within +/-pad lines, widening rather than ever returning nothing: an
-    over-narrow filter would manufacture MISSes.
+    bug's own FILE -- but never tighter than that.
+
+    An earlier version returned only the candidates within +/-pad of the ground truth's own
+    citation and discarded the rest of the file whenever that set was non-empty. That silently
+    threw away correct findings, because a ground-truth citation often does NOT contain the
+    line that has to change. Measured on this bench: of 11 located-but-misread bugs, 9 name a
+    fix outside their own cited range. M-02 cites Marketplace.sol 413-422 and 459-471 while
+    its fix belongs at line 288 in listVesting(); every run produced a candidate citing
+    276-288, and all of them were dropped from M-02's grading because other candidates
+    happened to sit nearer the citation.
+
+    So: grade against near AND same-file candidates, near first, de-duplicated by id. The
+    +/-pad distinction is kept only to order and explain the set, never to delete from it.
     """
     locs = bug_locations(gt_text)
     if not locs:
@@ -97,10 +108,15 @@ def candidates_for_bug(gt_text: str, candidates: list, pad: int = CANDIDATE_PAD)
         elif matched_file:
             same_file.append(c)
 
-    if near:
-        return near, f"{len(near)} near (+/-{pad} lines)"
-    if same_file:
-        return same_file, f"{len(same_file)} in the same file"
+    if near or same_file:
+        seen, merged = set(), []
+        for c in [*near, *same_file]:  # near first: most likely match leads the list
+            cid = c.get("id") or id(c)
+            if cid not in seen:
+                seen.add(cid)
+                merged.append(c)
+        return merged, (f"{len(merged)} in {os.path.basename(locs[0][0])} "
+                        f"({len(near)} near +/-{pad}, {len(same_file)} elsewhere in the file)")
     return candidates, f"all {len(candidates)} (none cite this file)"
 
 
