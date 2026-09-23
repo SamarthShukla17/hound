@@ -294,6 +294,64 @@ async def poc(r, kb, cand: dict, code: str, framework: str = "foundry", refs: st
         return f"// PoC generation failed: {exc}\n// This is a stub, not a test.\n"
 
 
+def _invariant_checklist(pmap) -> str:
+    """Render the mapper's invariants as a numbered checklist for the diagnoser to CHECK.
+
+    The open-ended diagnose prompt asks the model to state "what violates an invariant here",
+    which makes it invent the invariant and the violation together -- generation, which is
+    exactly where it fabricates. Handing it the map's invariants turns that into a
+    discriminative task: for each stated property, is it violated, yes or no.
+
+    Returns "" when the map carries no invariants, so callers can fall back to open-ended.
+    """
+    if not pmap:
+        return ""
+    data = pmap
+    if isinstance(data, str):
+        try:
+            data = json.loads(data)
+        except (json.JSONDecodeError, ValueError):
+            return ""  # pipeline may pass pre-formatted map TEXT; nothing to extract
+    if not isinstance(data, dict):
+        return ""
+    data = data.get("map", data)  # runs/*/map.json nests the map under "map"
+    invariants = data.get("invariants") or []
+    lines = [
+        f"  {inv.get('id', f'I{n}')}: {inv.get('statement', '')}"
+        for n, inv in enumerate(invariants, 1)
+        if isinstance(inv, dict) and inv.get("statement")
+    ]
+    return "INVARIANTS TO CHECK (from the map):\n" + "\n".join(lines) if lines else ""
+
+
+DIAGNOSE_INVARIANT_TASK = (
+    "TASK: DIAGNOSE\n"
+    "A prior pass located these lines. Its explanation is withheld on purpose so it cannot "
+    "anchor you on the wrong story.\n\n"
+    "Do NOT invent a property to test. Go through the listed invariants ONE AT A TIME and, for "
+    "each, answer whether THESE lines violate it. Cite the specific line for every answer.\n\n"
+    "CRITICAL — the listed invariants were inferred from this same code, so an invariant may "
+    "have been copied from the very check that is broken. If a stated invariant is satisfied "
+    "only because it restates the buggy condition, say so: set mis_stated to true for that id, "
+    "give the property the protocol ACTUALLY needs, and judge the lines against that instead. "
+    "Likewise, if the real defect here is not covered by any listed invariant, set "
+    "uncovered_property and judge against it. A correct answer can be that every listed "
+    "invariant holds and nothing is wrong.\n\n"
+    "Then, only if something is genuinely violated, fill these IN THIS ORDER:\n"
+    "  1. observation — what the cited lines literally do. NO consequence.\n"
+    "  2. invariant — the property actually broken (the corrected one, if you corrected it).\n"
+    "  3. violation — the specific input or call sequence that breaks it, cited.\n"
+    "  4. impact — what follows FROM the violation, derivable from 1-3 alone.\n\n"
+    "Do not assert theft, minting, draining or locking unless you traced the value movement.\n\n"
+    'Return ONLY this JSON shape: {"checks": [{"invariant_id": "I1", "violated": false, '
+    '"mis_stated": false, "why": "...", "cited_line": "File.sol:123"}], '
+    '"uncovered_property": "", "defect_found": true, "title": "...", '
+    '"severity": "critical|high|medium|low", "bug_class": "...", "observation": "...", '
+    '"invariant": "...", "violation": "...", "impact": "...", '
+    '"exploit_steps": ["..."], "falsification": "...", "confidence": 0.5}'
+)
+
+
 DIAGNOSE_TASK = (
     "TASK: DIAGNOSE\n"
     "Something at the cited lines may be wrong. You have NOT been told what anyone thinks the "
@@ -318,19 +376,28 @@ DIAGNOSE_TASK = (
 )
 
 
-async def diagnose(r, kb, code: str, location: str, pmap=None, scope=None, notes: str = "", cache_salt: str = ""):
+async def diagnose(r, kb, code: str, location: str, pmap=None, scope=None, notes: str = "",
+                   cache_salt: str = "", mode: str = "open"):
     """Read the cited region cold and say what is actually wrong there, if anything.
 
     Deliberately receives the location and the code but NOT the locating pass's root_cause or
     impact. The measured failure mode is that a hunter reaches the right lines and then invents
     the defect; handing its story to the diagnoser would just launder that story. Returns a dict
     with defect_found plus the mechanism fields, or {} if the call fails.
+
+    mode="open"      the original open-ended framing: "state what violates an invariant here".
+    mode="invariant" check the map's invariants one at a time (see _invariant_checklist).
+                     Falls back to "open" when the map carries no invariants, because an empty
+                     checklist would otherwise ask the model to check nothing.
     """
     sys_prompt = system(kb, scope)
     map_block = _map_block(pmap)
     notes_block = f"SCOPE NOTES (trusted roles, exclusions):\n{notes}" if notes else ""
     loc_block = f"LINES TO EXAMINE: {location}"
-    user = _user_prompt(code, map_block, notes_block, loc_block, DIAGNOSE_TASK)
+
+    checklist = _invariant_checklist(pmap) if mode == "invariant" else ""
+    task = DIAGNOSE_INVARIANT_TASK if checklist else DIAGNOSE_TASK
+    user = _user_prompt(code, map_block, notes_block, checklist, loc_block, task)
 
     try:
         data = await r.chat_json("diagnose", sys_prompt, user, temperature=0.0, **_salt(cache_salt))

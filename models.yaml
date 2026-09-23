@@ -77,7 +77,10 @@ max_tokens:
   hunter: 20000
   judge: 24000
   judge2: 24000
-  diagnose: 24000
+  # 12000, not 24000: a real diagnosis answer measured 2088-9028 completion tokens, so this
+  # is ample for the ANSWER while halving the time a reasoning-only burn wastes before it
+  # gives up and falls through to the reasoning-off fallback.
+  diagnose: 12000
   poc: 8000
   # 8000, not 60000: a grading call carries ONE bug and a ~3k prompt, so a well-behaved reply
   # is a few hundred tokens. At 60000 a reasoning model twice spent the entire budget inside
@@ -107,10 +110,17 @@ roles:
   hunter:
     - {provider: openrouter, model: z-ai/glm-4.7-flash, extra: {extra_body: {reasoning: {enabled: false}}}}
 
-  # Diagnosis reads ONE cited region cold, so the input is small and mandatory reasoning has
-  # room. Strongest configured model: this stage is where the defect is actually identified.
+  # Diagnosis reads ONE cited region cold. The claim that "the input is small and mandatory
+  # reasoning has room" was WRONG and cost us: measured 2026-09-22, glm-5.3-flash burned all
+  # 24000 completion tokens inside <think> on a 13.8k-char region and blew the 300s ceiling on
+  # a 28.7k-char one. With a single target that silently returned {}, and 25 of 45 regions
+  # across three runs were never diagnosed at all.
+  # So: keep the strongest model first, but always leave somewhere to fall. glm-4.7-flash
+  # takes reasoning-off, which is exactly what stops the burn.
   diagnose:
     - {provider: openrouter, model: z-ai/glm-5.3-flash}
+    - {provider: openrouter, model: z-ai/glm-4.7-flash, extra: {extra_body: {reasoning: {enabled: false}}}}
+    - {provider: zai, model: glm-4.7-flash, extra: {extra_body: {thinking: {type: disabled}}}}
 
   # Temperature is already 0 for judge calls (see agents.judge). PAID primary, free fallback.
   # z-ai/glm-5.3-flash has MANDATORY reasoning (a reasoning-off extra 400s: "Reasoning is

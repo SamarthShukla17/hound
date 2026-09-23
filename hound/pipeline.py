@@ -141,8 +141,14 @@ async def run_diagnosis(router, kb, cands, files, *, judge_budget, map_text, sco
     ))
 
     replaced = 0
+    undiagnosed = []
     for (loc, members), data in zip(regions, results):
         if not data:
+            # NEVER pass over this silently. A region that returns {} contributes nothing, and
+            # when this was a bare `continue` it hid a 56% failure rate across three runs
+            # (25 of 45 regions) -- the locating pass's own guess survived into the findings
+            # while the report implied it had been re-read cold.
+            undiagnosed.append(loc)
             continue
         for c in members:
             c["hunter_claim"] = {k: c.get(k, "") for k in
@@ -161,6 +167,13 @@ async def run_diagnosis(router, kb, cands, files, *, judge_budget, map_text, sco
             if not c["defect_found"]:
                 c["impact"] = data.get("impact") or "diagnosis found no invariant violation at these lines"
             replaced += 1
+
+    if undiagnosed:
+        print(f"DIAGNOSIS FAILED on {len(undiagnosed)}/{len(regions)} region(s) -- these keep the "
+              f"locating pass's unverified guess:")
+        for loc in undiagnosed:
+            print(f"  NOT DIAGNOSED: {loc}")
+    print(f"diagnosed {len(regions) - len(undiagnosed)}/{len(regions)} region(s)")
     return replaced
 
 

@@ -80,3 +80,24 @@ def test_judges_have_the_large_reasoning_budget_but_the_scorer_no_longer_does():
     caps = load_models_config()["max_tokens"]
     assert caps["judge"] == 24000 and caps["judge2"] == 24000
     assert caps["scorer"] == 8000
+
+
+def test_diagnose_has_somewhere_to_fall_when_the_primary_burns_out():
+    """A single-target diagnose role silently returned {} for 25 of 45 regions on 2026-09-22
+    when glm-5.3-flash spent its whole budget reasoning. The fallbacks must be reasoning-OFF,
+    because reasoning-on is the failure being fallen back FROM."""
+    config = load_models_config()
+    targets = config["roles"]["diagnose"]
+    assert len(targets) >= 2, "diagnose must not be a single point of failure"
+
+    for t in targets[1:]:
+        extra = t.get("extra", {}).get("extra_body", {})
+        reasoning_off = extra.get("reasoning", {}).get("enabled") is False
+        thinking_off = extra.get("thinking", {}).get("type") == "disabled"
+        assert reasoning_off or thinking_off, f"fallback {t['model']} still has reasoning on"
+
+
+def test_diagnose_budget_fits_a_real_answer_without_funding_a_long_burn():
+    """Measured real diagnosis answers: 2088-9028 completion tokens."""
+    caps = load_models_config()["max_tokens"]
+    assert 9028 < caps["diagnose"] <= 12000

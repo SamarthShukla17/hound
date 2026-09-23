@@ -1,10 +1,11 @@
 """Step 6: agent prompt builders — monkeypatched Router, no network."""
 
 import asyncio
+import json
 
 import pytest
 
-from hound.agents import diagnose, hunter, judge, mapper, poc, system
+from hound.agents import _invariant_checklist, diagnose, hunter, judge, mapper, poc, system
 from hound.knowledge import KB, Lens
 from hound.schema import Verdict
 
@@ -401,3 +402,73 @@ def test_diagnose_uses_its_own_role_and_returns_empty_on_failure(kb):
             raise RuntimeError("all targets failed")
 
     assert asyncio.run(diagnose(Broken(), kb, "  1| x", "V.sol:1")) == {}
+
+
+# --- invariant-check diagnose framing -------------------------------------------------------
+
+
+REAL_MAP = {"map": {"invariants": [
+    {"id": "I3", "statement": "A user cannot claim more tokens than are available."},
+    {"id": "I4", "statement": "A user cannot transfer more vested tokens than they hold (total - claimed)."},
+]}}
+
+
+def test_checklist_extracts_invariants_from_a_nested_map_dict():
+    block = _invariant_checklist(REAL_MAP)
+    assert "INVARIANTS TO CHECK" in block
+    assert "I3: A user cannot claim more tokens" in block
+    assert "I4: A user cannot transfer more vested" in block
+
+
+def test_checklist_accepts_a_json_string_and_a_flat_map():
+    assert "I4:" in _invariant_checklist(json.dumps(REAL_MAP))
+    assert "I4:" in _invariant_checklist(REAL_MAP["map"])  # not nested under "map"
+
+
+def test_checklist_is_empty_when_there_is_nothing_to_check():
+    """An empty checklist must render "" so diagnose() can fall back rather than ask the model
+    to check an empty list."""
+    assert _invariant_checklist(None) == ""
+    assert _invariant_checklist({"map": {"invariants": []}}) == ""
+    assert _invariant_checklist("pre-formatted map text, not JSON") == ""
+    assert _invariant_checklist({"map": {"invariants": [{"id": "I1"}]}}) == ""  # no statement
+
+
+def _capture_prompt(monkeypatch):
+    seen = {}
+
+    class R:
+        async def chat_json(self, role, sys_prompt, user, **kw):
+            seen["user"] = user
+            return {"defect_found": False}
+
+    return R(), seen
+
+
+def test_invariant_mode_puts_the_checklist_in_the_prompt(kb):
+    r, seen = _capture_prompt(None)
+    asyncio.run(diagnose(r, kb, "code", "V.sol:1-9", pmap=REAL_MAP, mode="invariant"))
+    assert "INVARIANTS TO CHECK" in seen["user"]
+    assert "ONE AT A TIME" in seen["user"]
+
+
+def test_invariant_mode_warns_that_an_invariant_may_restate_the_bug(kb):
+    """I4 in the real SecondSwap map was copied from the buggy check itself. Without this
+    warning, checking against it confirms the defect is correct behaviour."""
+    r, seen = _capture_prompt(None)
+    asyncio.run(diagnose(r, kb, "code", "V.sol:1-9", pmap=REAL_MAP, mode="invariant"))
+    assert "mis_stated" in seen["user"]
+    assert "uncovered_property" in seen["user"]
+
+
+def test_invariant_mode_falls_back_to_open_when_the_map_has_no_invariants(kb):
+    r, seen = _capture_prompt(None)
+    asyncio.run(diagnose(r, kb, "code", "V.sol:1-9", pmap={"map": {"invariants": []}}, mode="invariant"))
+    assert "INVARIANTS TO CHECK" not in seen["user"]
+    assert "state what, if anything, ACTUALLY violates" in seen["user"]
+
+
+def test_open_mode_is_unchanged_and_is_the_default(kb):
+    r, seen = _capture_prompt(None)
+    asyncio.run(diagnose(r, kb, "code", "V.sol:1-9", pmap=REAL_MAP))
+    assert "INVARIANTS TO CHECK" not in seen["user"]

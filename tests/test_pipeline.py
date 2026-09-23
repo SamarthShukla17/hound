@@ -755,3 +755,74 @@ def test_no_diagnose_skips_the_stage(fixture_repo, kb_dir, tmp_path, monkeypatch
         _run_scan(fixture_repo, kb_dir, tmp_path, monkeypatch, mock, no_diagnose=True)
         tasks = [r["messages"][-1]["content"] for r in mock.requests]
     assert not any("TASK: DIAGNOSE" in t for t in tasks)
+
+
+# --- diagnosis failures must be loud ---------------------------------------------------------
+
+
+class _FlakyDiagnoser:
+    """Answers for some locations and returns {} for the rest, like a region that burned out."""
+
+    def __init__(self, answer_for):
+        self.answer_for = answer_for
+
+    async def __call__(self, router, kb, code, location, pmap=None, scope=None, notes="", cache_salt=""):
+        if location in self.answer_for:
+            return {"defect_found": True, "title": "Real defect", "severity": "medium",
+                    "observation": "o", "invariant": "i", "violation": "v", "impact": "x"}
+        return {}
+
+
+def test_regions_that_return_nothing_are_named_not_silently_skipped(tmp_path, monkeypatch, capsys):
+    """The bug this guards: a bare `continue` hid 25 of 45 undiagnosed regions across three
+    runs, while the findings kept the locating pass's unverified guess."""
+    import asyncio
+
+    import hound.pipeline as pipeline
+
+    (tmp_path / "Vault.sol").write_text(FIXTURE_VAULT_SOL)
+    files = load(tmp_path)[0]
+    cands = [_c("F001", "Vault.sol:12-14"), _c("F002", "Vault.sol:20-22")]
+    monkeypatch.setattr(pipeline, "diagnose", _FlakyDiagnoser({"Vault.sol:12-14"}))
+
+    replaced = asyncio.run(run_diagnosis(None, None, cands, files, judge_budget=100_000,
+                                         map_text="", scope=None, notes=""))
+
+    out = capsys.readouterr().out
+    assert replaced == 1
+    assert "DIAGNOSIS FAILED on 1/2 region(s)" in out
+    assert "NOT DIAGNOSED: Vault.sol:20-22" in out
+    assert "diagnosed 1/2 region(s)" in out
+
+
+def test_the_undiagnosed_candidate_keeps_no_false_diagnosed_flag(tmp_path, monkeypatch):
+    import asyncio
+
+    import hound.pipeline as pipeline
+
+    (tmp_path / "Vault.sol").write_text(FIXTURE_VAULT_SOL)
+    files = load(tmp_path)[0]
+    cands = [_c("F001", "Vault.sol:12-14"), _c("F002", "Vault.sol:20-22")]
+    monkeypatch.setattr(pipeline, "diagnose", _FlakyDiagnoser({"Vault.sol:12-14"}))
+    asyncio.run(run_diagnosis(None, None, cands, files, judge_budget=100_000,
+                              map_text="", scope=None, notes=""))
+
+    assert cands[0].get("diagnosed") is True
+    assert not cands[1].get("diagnosed")  # never claim a region was re-read when it was not
+
+
+def test_a_fully_successful_run_still_reports_its_count(tmp_path, monkeypatch, capsys):
+    import asyncio
+
+    import hound.pipeline as pipeline
+
+    (tmp_path / "Vault.sol").write_text(FIXTURE_VAULT_SOL)
+    files = load(tmp_path)[0]
+    cands = [_c("F001", "Vault.sol:12-14")]
+    monkeypatch.setattr(pipeline, "diagnose", _FlakyDiagnoser({"Vault.sol:12-14"}))
+    asyncio.run(run_diagnosis(None, None, cands, files, judge_budget=100_000,
+                              map_text="", scope=None, notes=""))
+
+    out = capsys.readouterr().out
+    assert "diagnosed 1/1 region(s)" in out
+    assert "DIAGNOSIS FAILED" not in out
