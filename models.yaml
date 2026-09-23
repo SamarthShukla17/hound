@@ -82,11 +82,16 @@ max_tokens:
   # gives up and falls through to the reasoning-off fallback.
   diagnose: 12000
   poc: 8000
-  # 8000, not 60000: a grading call carries ONE bug and a ~3k prompt, so a well-behaved reply
-  # is a few hundred tokens. At 60000 a reasoning model twice spent the entire budget inside
-  # <think> and returned an empty string — 186s and $0.018 for nothing. Raising the ceiling
-  # feeds that failure; capping it turns a silent 3-minute burn into a fast, visible one.
-  scorer: 8000
+  # 32000. Set from the MEASURED distribution of 270 successful scorer calls, not from a guess:
+  # median 1264 completion tokens, p90 10359, p99 24847, max 36045. Mandatory reasoning makes
+  # the tail enormous even though the answer itself is short.
+  #   cap  8000 -> 14% of calls burn     cap 24000 -> 1.5%
+  #   cap 16000 ->  4%                   cap 32000 -> 0.4%
+  # An earlier 8000 here (guessed from "the answer is only a few hundred tokens") burned 14% of
+  # calls; since ANY fallback use trips scorer_fallback_error, that aborted every scoring run.
+  # 32000 keeps the burn rate near zero while still costing half of the old 60000 when one does
+  # happen. Lower this only against fresh measurements.
+  scorer: 32000
 
 # Reasoning is switched off where the provider supports it, via `extra` (passed straight to
 # the SDK call):

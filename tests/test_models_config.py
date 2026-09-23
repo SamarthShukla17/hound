@@ -73,13 +73,14 @@ def test_judges_have_the_large_reasoning_budget_but_the_scorer_no_longer_does():
     """Mandatory-reasoning models spend the completion budget thinking before emitting content,
     so the judges keep a large ceiling.
 
-    The scorer's 60000 belonged to the OLD design, where one call graded every candidate against
-    every ground-truth bug. Scoring is per-bug now — one bug, a ~3k prompt — so the huge ceiling
-    stopped being headroom and became a hazard: twice a model spent all 60000 tokens reasoning
-    and returned nothing, at 186s and $0.018 per silent failure."""
+    The scorer's ceiling is set from measurement, not intuition. Across 270 successful scorer
+    calls: median 1264 completion tokens, p90 10359, max 36045 -- the ANSWER is short but
+    mandatory reasoning gives it a very long tail. A cap of 8000 (guessed from the short answer)
+    burned 14% of calls, and because any fallback use trips scorer_fallback_error, that aborted
+    every scoring run. Keep it well above p99."""
     caps = load_models_config()["max_tokens"]
     assert caps["judge"] == 24000 and caps["judge2"] == 24000
-    assert caps["scorer"] == 8000
+    assert caps["scorer"] >= 32000, "below p99 (24847) the burn rate aborts whole scoring runs"
 
 
 def test_diagnose_has_somewhere_to_fall_when_the_primary_burns_out():
