@@ -472,3 +472,11 @@ def test_open_mode_is_unchanged_and_is_the_default(kb):
     r, seen = _capture_prompt(None)
     asyncio.run(diagnose(r, kb, "code", "V.sol:1-9", pmap=REAL_MAP))
     assert "INVARIANTS TO CHECK" not in seen["user"]
+
+
+def test_invariant_mode_stays_opt_in_because_it_measured_worse():
+    """Guard against someone promoting mode="invariant" to the default. Measured 2026-09-23:
+    it flipped M-10 from correct to "no defect found", and the escape hatches fired 0/12."""
+    import inspect
+
+    assert inspect.signature(diagnose).parameters["mode"].default == "open"

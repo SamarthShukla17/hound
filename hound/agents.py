@@ -297,10 +297,26 @@ async def poc(r, kb, cand: dict, code: str, framework: str = "foundry", refs: st
 def _invariant_checklist(pmap) -> str:
     """Render the mapper's invariants as a numbered checklist for the diagnoser to CHECK.
 
-    The open-ended diagnose prompt asks the model to state "what violates an invariant here",
-    which makes it invent the invariant and the violation together -- generation, which is
-    exactly where it fabricates. Handing it the map's invariants turns that into a
-    discriminative task: for each stated property, is it violated, yes or no.
+    MEASURED WORSE -- kept behind mode="invariant", NOT the default. Do not promote it without
+    new measurements. Tested 2026-09-23 on the two regions it was designed for:
+
+      M-10  open framing found the real defect (releaseRate recomputed ignoring amountClaimed);
+            invariant framing marked all 6 invariants satisfied and returned defect_found=False.
+            Correct -> wrong.
+      M-02  both framings wrong; invariant framing returned defect_found=False.
+
+      Escape hatches fired 0 times in 12 invariant checks: mis_stated never true,
+      uncovered_property never set.
+
+    The root cause is structural, not a prompt-wording problem. The mapper derives invariants
+    FROM the code, so a broken check gets written up as the specification: the real I4 read
+    "a user cannot transfer more vested tokens than they currently hold (total - claimed)",
+    which restates M-10's buggy condition verbatim. Checking the code against it certifies the
+    bug. A checklist of six mostly-irrelevant properties also invites six cheap dismissals
+    ("this does not affect...") instead of re-reading what the lines do.
+
+    The hypothesis was that turning generation into discrimination would curb fabrication. It
+    would need invariants from a source independent of the code under test to be worth retrying.
 
     Returns "" when the map carries no invariants, so callers can fall back to open-ended.
     """
@@ -386,7 +402,10 @@ async def diagnose(r, kb, code: str, location: str, pmap=None, scope=None, notes
     with defect_found plus the mechanism fields, or {} if the call fails.
 
     mode="open"      the original open-ended framing: "state what violates an invariant here".
-    mode="invariant" check the map's invariants one at a time (see _invariant_checklist).
+                     THE DEFAULT, and measured better -- see _invariant_checklist.
+    mode="invariant" check the map's invariants one at a time. MEASURED WORSE (it flipped M-10
+                     from correct to "no defect found"); kept only for a future retry with
+                     invariants sourced independently of the code under test.
                      Falls back to "open" when the map carries no invariants, because an empty
                      checklist would otherwise ask the model to check nothing.
     """
