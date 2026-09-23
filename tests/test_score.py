@@ -287,12 +287,22 @@ def test_a_bug_that_cannot_be_graded_at_all_aborts_instead_of_counting_as_a_miss
     assert not (run_dir[0] / "score.json").exists()
 
 
-def test_a_non_429_error_is_not_retried(run_dir, fake_router):
+def test_a_transient_error_is_retried_on_the_same_grader(run_dir, fake_router):
+    """Was "only a 429 is retried". Measured 2026-09-24: one timed-out call out of ~46 fell
+    through to a different model and scorer_fallback_error discarded the whole completed run
+    (23/23 bugs graded, 0 failed calls). A timeout is not evidence that a bug is ungradeable,
+    so every transient failure now earns a retry against the SAME configured grader."""
     fake_router.sequence = [RuntimeError("Error code: 500 - server error"),
-                            {"verdict": "MISS", "finding_id": None, "why": "w"},
-                            {"verdict": "MISS", "finding_id": None, "why": "w"}]
+                            {"verdict": "EXACT", "finding_id": "F001", "why": "w"},
+                            {"verdict": "EXACT", "finding_id": "F001", "why": "w"}]
     _run(run_dir, repeats=1)
-    assert fake_router.slept == []
+    assert fake_router.slept, "a transient error must be retried, not turned into a failed grade"
+
+
+def test_retries_are_bounded_so_a_dead_provider_does_not_hang_the_run(run_dir, fake_router):
+    fake_router.sequence = [RuntimeError("Error code: 500 - server error")] * 20
+    _run(run_dir, repeats=1)
+    assert len(fake_router.slept) <= 2 * 23, "at most 2 retries per grading call"
 
 
 def test_missing_findings_json_fails_gracefully(tmp_path, capsys):

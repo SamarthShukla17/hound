@@ -157,11 +157,19 @@ roles:
   # authenticate but their accounts are out of credit (checked 2026-09-23), so promoting them
   # would abort every run. As fallbacks they cost nothing while empty and start absorbing load
   # the moment either account is funded -- no code change needed then.
+  # zai is deliberately NOT a scorer fallback. Measured 2026-09-24: a low-bucket run graded
+  # all 23 bugs with 0 failed calls, but ONE call timed out on the primary, fell through to
+  # zai, and scorer_fallback_error then discarded the whole completed run. Five attempts, five
+  # identical aborts, ~80 minutes. A grader that answers even one call changes what the number
+  # means, so the answer is not to tolerate the mix -- it is to not offer a different grader in
+  # the first place, and let a failed call retry the primary instead.
+  # anthropic/openai stay listed per plan: both accounts are unfunded so they raise immediately
+  # today (costing only a fast failed hop), and when one is funded it becomes a deliberate
+  # choice to promote it to primary rather than a silent grader swap.
   scorer:
     - {provider: openrouter, model: z-ai/glm-5.3-flash}
     - {provider: anthropic, model: claude-sonnet-5}
     - {provider: openai, model: o3}
-    - {provider: zai, model: glm-4.7-flash, extra: {extra_body: {thinking: {type: disabled}}}}
 
 # $ per million tokens: [input, output]. Approximate — verify before trusting cost reports.
 prices:

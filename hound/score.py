@@ -242,13 +242,19 @@ def scorer_fallback_error(router) -> str:
 
 async def _score_one_call(router, gt_id: str, gt_text: str, candidates_json: str, attempt: int,
                           pass_id: str = "") -> dict:
-    """One grading call for ONE bug. Retried once on a 429; 402 aborts the whole run."""
+    """One grading call for ONE bug. Retried on any transient error; 402 aborts the whole run.
+
+    Retries are against the SAME target chain, which is why the scorer has no different-model
+    fallback: a transient timeout must be re-attempted on the configured grader, never answered
+    by another one. Measured 2026-09-24, a single timed-out call out of ~46 was enough to
+    discard an otherwise complete run, so one retry was not enough.
+    """
     user = (
         "TASK: SCORE\n\n"
         f"GROUND-TRUTH BUG {gt_id}:\n{gt_text}\n\n"
         f"CANDIDATE FINDINGS:\n{candidates_json}"
     )
-    for tries in (1, 2):
+    for tries in (1, 2, 3):
         try:
             return await router.chat_json(
                 "scorer", SYSTEM_PROMPT, user, temperature=0.0,
@@ -260,7 +266,10 @@ async def _score_one_call(router, gt_id: str, gt_text: str, candidates_json: str
         except OutOfCredits:
             raise
         except Exception as exc:  # noqa: BLE001
-            if tries == 1 and "429" in str(exc):
+            # Any transient failure earns a retry on the same grader -- rate limits, timeouts
+            # and transport errors are all things this provider does routinely, and none of
+            # them mean the bug is ungradeable.
+            if tries < 3:
                 await asyncio.sleep(RETRY_DELAY_SECONDS)
                 continue
             # NOT silently a MISS: an ungraded bug that counts as MISS understates recall and

@@ -71,13 +71,16 @@ def test_judge_is_glm_5_3_flash_then_zai_fallback():
     ]
 
 
-def test_scorer_leads_with_the_same_grader_and_keeps_zai_last():
-    """The primary must not drift: a run graded by a different model is not comparable to the
-    runs before it, which is what scorer_fallback_error exists to catch. zai stays LAST because
-    measurement put it at 140 backoffs / 243 429s against OpenRouter's 13 / 6 on one run."""
+def test_the_scorer_offers_no_funded_alternative_grader():
+    """scorer_fallback_error discards any run a second model helped grade, so a reachable
+    fallback is a run-killer, not a safety net: on 2026-09-24 ONE stray call to zai threw away
+    a run that had graded all 23 bugs with no failures. zai is therefore gone from this chain.
+    anthropic/openai may stay listed only while they are unfunded -- they raise immediately, so
+    they cost a fast failed hop and can never silently grade. Funding one is a deliberate
+    decision to PROMOTE it to primary, not to leave it here."""
     targets = [(t["provider"], t["model"]) for t in load_models_config()["roles"]["scorer"]]
     assert targets[0] == ("openrouter", "z-ai/glm-5.3-flash")
-    assert targets[-1] == ("zai", "glm-4.7-flash")
+    assert ("zai", "glm-4.7-flash") not in targets
 
 
 def test_hunter_max_tokens_is_20000():
