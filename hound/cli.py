@@ -72,6 +72,12 @@ def _cmd_diff(args: argparse.Namespace) -> int:
     return asyncio.run(diff_command(args))
 
 
+def _cmd_config_check(args: argparse.Namespace) -> int:
+    from .config_check import config_command
+
+    return asyncio.run(config_command(args))
+
+
 def _cmd_check(args: argparse.Namespace) -> int:
     from .llm import check
 
@@ -129,6 +135,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     scan.add_argument("--max-diff-pairs", dest="max_diff_pairs", type=int, default=40,
                       help="review at most this many function pairs with an LLM (default: 40)")
+    scan.add_argument(
+        "--config-check", dest="config_check", choices=["auto", "off"], default="auto",
+        help="cross-check the deploy/verify scripts' actual parameter values against the contracts (auto: when scripts exist)",
+    )
     scan.add_argument("--dry-run", dest="dry_run", action="store_true")
     scan.add_argument("--out", default="runs", help="output directory (default: runs)")
     scan.set_defaults(handler=_cmd_scan)
@@ -204,6 +214,16 @@ def build_parser() -> argparse.ArgumentParser:
     diff.add_argument("--no-llm", dest="no_llm", action="store_true", help="deterministic diff only, no model calls")
     diff.add_argument("--out", default="runs")
     diff.set_defaults(handler=_cmd_diff)
+
+    cfg = sub.add_parser(
+        "config-check", help="cross-check every deployed parameter (from the deploy/verify scripts) against the contracts"
+    )
+    cfg.add_argument("target", help="path to the target codebase")
+    cfg.add_argument("--kb", default="kb")
+    cfg.add_argument("--scope", default=None, help="scope file: one glob per line")
+    cfg.add_argument("--no-llm", dest="no_llm", action="store_true", help="deterministic table and flags only")
+    cfg.add_argument("--out", default="runs")
+    cfg.set_defaults(handler=_cmd_config_check)
 
     check = sub.add_parser("check", help="ping each role's first fallback target")
     check.add_argument("--paid", action="store_true", help="also probe x402 providers (spends real money)")

@@ -16,6 +16,8 @@ from .agents import diagnose, hunter, judge, mapper, poc
 from .codebase import build_provenance, check_provenance, chunk, load, rel_path
 from .knowledge import load_kb, poc_refs, select
 from .deviation_review import gather_text_for_detection, hunter_notes, resolve_upstream, upstream_diff, write_artifacts
+from . import config_check as cfgchk
+from .config_extract import find_config_files
 from .upstream import load_registry
 from .llm import OutOfCredits, Router, parse_cache_any_model
 from .runs import CITATION_GATE, STALE_CITATION, is_hard_kill, read_findings, write_findings
@@ -322,6 +324,9 @@ async def _scan(args) -> int:
                 print(f"upstream: {exc}")
                 return 1
             print(f"upstream diff: {found.name + ' detected (will fetch its source and review up to ' + str(getattr(args, 'max_diff_pairs', 40)) + ' function pairs)' if found else 'no known upstream detected'}")
+        if getattr(args, "config_check", "off") != "off":
+            scripts = find_config_files(args.target)
+            print(f"config check: {len(scripts)} deploy/verify/config scripts found" + ("" if scripts else " (nothing to cross-check)"))
         return 0
 
     router = Router(
@@ -367,6 +372,7 @@ async def _scan(args) -> int:
     # A fork is compared against the REAL upstream source, statement by statement, before any
     # hunting: the deviations become the hunters' starting points. Failure never stops a scan.
     hunt_notes = notes_text
+    udiff = None
     if up_choice != "off":
         try:
             udiff = await upstream_diff(
@@ -385,6 +391,27 @@ async def _scan(args) -> int:
             n_pairs = len(udiff.result.get("pairs", []))
             print(f"upstream diff vs {udiff.upstream_name}: {n_pairs} pairs, {len(udiff.reviews)} reviewed"
                   + (f", {len(udiff.fetch_failures)} fetch failures" if udiff.fetch_failures else ""))
+
+    # --- CONFIG CROSS-CHECK ---
+    # What the deploy scripts actually set (not test defaults), joined to what the contracts assume.
+    if getattr(args, "config_check", "off") != "off":
+        refs, hints = [], {}
+        if up_choice != "off" and udiff is not None:
+            up = load_registry().get(udiff.upstream_key)
+            if up is not None:
+                refs, hints = up.reference_params, up.contract_hints
+        try:
+            cfg = await cfgchk.run(args.target, files, router=router, kb_dir=args.kb, refs=refs, hints=hints)
+        except (ValueError, OSError) as exc:
+            print(f"config check skipped: {exc}")
+            cfg = None
+        if cfg is None:
+            print("config check: no deploy/verify scripts found")
+        else:
+            cfgchk.write_artifacts(run_dir, cfg)
+            hunt_notes = "\n\n".join(x for x in (hunt_notes, cfgchk.notes_for_hunters(cfg)) if x)
+            print(f"config check: {len(cfg.rows)} deployed parameters, {sum(1 for r in cfg.rows if r.flags)} flagged, "
+                  f"{len(cfg.unset)} never set")
 
     # --- HUNT ---
     # TODO(step 8): thread hound.corpus.recent() through as `killed` once it exists.
