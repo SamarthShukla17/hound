@@ -17,6 +17,7 @@ from .codebase import build_provenance, check_provenance, chunk, load, rel_path
 from .knowledge import load_kb, poc_refs, select
 from .deviation_review import gather_text_for_detection, hunter_notes, resolve_upstream, upstream_diff, write_artifacts
 from . import config_check as cfgchk
+from . import coverage_gap as covgap
 from .config_extract import find_config_files
 from .upstream import load_registry
 from .llm import OutOfCredits, Router, parse_cache_any_model
@@ -327,6 +328,9 @@ async def _scan(args) -> int:
         if getattr(args, "config_check", "off") != "off":
             scripts = find_config_files(args.target)
             print(f"config check: {len(scripts)} deploy/verify/config scripts found" + ("" if scripts else " (nothing to cross-check)"))
+        cov_spec = getattr(args, "coverage", "off")
+        if cov_spec != "off":
+            print(f"coverage gaps: {'will run forge coverage (foundry projects only)' if cov_spec == 'auto' else 'from ' + cov_spec}")
         return 0
 
     router = Router(
@@ -412,6 +416,18 @@ async def _scan(args) -> int:
             hunt_notes = "\n\n".join(x for x in (hunt_notes, cfgchk.notes_for_hunters(cfg)) if x)
             print(f"config check: {len(cfg.rows)} deployed parameters, {sum(1 for r in cfg.rows if r.flags)} flagged, "
                   f"{len(cfg.unset)} never set")
+
+    # --- COVERAGE GAPS ---
+    # Branches the team's own tests never exercise are leads: low test coverage often means low scrutiny.
+    cov_spec = getattr(args, "coverage", "off")
+    if cov_spec != "off":
+        gaps, cov_msg = await asyncio.to_thread(covgap.analyse, args.target, files, spec=cov_spec)
+        if gaps:
+            covgap.write_artifacts(run_dir, gaps)
+            hunt_notes = "\n\n".join(x for x in (hunt_notes, covgap.hunter_notes(gaps)) if x)
+            print(f"coverage gaps: {len(gaps)} functions with unexercised branches (top: {', '.join(g.function for g in gaps[:3])})")
+        else:
+            print(f"coverage gaps: no signal ({cov_msg})")
 
     # --- HUNT ---
     # TODO(step 8): thread hound.corpus.recent() through as `killed` once it exists.

@@ -72,6 +72,12 @@ def _cmd_diff(args: argparse.Namespace) -> int:
     return asyncio.run(diff_command(args))
 
 
+def _cmd_coverage(args: argparse.Namespace) -> int:
+    from .coverage_gap import coverage_command
+
+    return asyncio.run(coverage_command(args))
+
+
 def _cmd_config_check(args: argparse.Namespace) -> int:
     from .config_check import config_command
 
@@ -138,6 +144,11 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument(
         "--config-check", dest="config_check", choices=["auto", "off"], default="auto",
         help="cross-check the deploy/verify scripts' actual parameter values against the contracts (auto: when scripts exist)",
+    )
+    scan.add_argument(
+        "--coverage", default="auto", metavar="auto|off|LCOV_FILE",
+        help="rank functions whose branches the team's own tests never exercise and hand them to the hunters: auto "
+             "(default) runs `forge coverage` in a foundry project, off skips, or give a precomputed lcov file",
     )
     scan.add_argument("--dry-run", dest="dry_run", action="store_true")
     scan.add_argument("--out", default="runs", help="output directory (default: runs)")
@@ -224,6 +235,13 @@ def build_parser() -> argparse.ArgumentParser:
     cfg.add_argument("--no-llm", dest="no_llm", action="store_true", help="deterministic table and flags only")
     cfg.add_argument("--out", default="runs")
     cfg.set_defaults(handler=_cmd_config_check)
+
+    cov = sub.add_parser("coverage", help="rank functions whose branches the team's tests never exercise (lead generation)")
+    cov.add_argument("target", help="path to the target codebase")
+    cov.add_argument("--lcov", default=None, help="a precomputed lcov file (default: run `forge coverage`)")
+    cov.add_argument("--scope", default=None, help="scope file: one glob per line")
+    cov.add_argument("--out", default="runs")
+    cov.set_defaults(handler=_cmd_coverage)
 
     check = sub.add_parser("check", help="ping each role's first fallback target")
     check.add_argument("--paid", action="store_true", help="also probe x402 providers (spends real money)")
