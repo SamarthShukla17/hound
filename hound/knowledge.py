@@ -37,6 +37,7 @@ class Lens:
 class KB:
     principles: str
     lenses: list = field(default_factory=list)
+    tiers: str = ""  # kb/FINDING_TIERS.md: the profit-vs-disruption question, put in every prompt
 
 
 def _find_file(directory: Path, name: str) -> Path:
@@ -148,7 +149,10 @@ def load_kb(directory) -> KB:
     angle_lenses = _parse_angles(angles_text)
     pattern_lenses = _parse_patterns(patterns_text)
 
-    return KB(principles=principles, lenses=[*class_lenses, *angle_lenses, *pattern_lenses])
+    return KB(
+        principles=principles, lenses=[*class_lenses, *angle_lenses, *pattern_lenses],
+        tiers=load_doc(directory, "FINDING_TIERS.md"),
+    )
 
 
 def load_doc(directory, name: str, required: bool = False) -> str:

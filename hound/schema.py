@@ -4,6 +4,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from .tiers import normalise as _norm_tier, stated_gain
+
 Severity = Literal["critical", "high", "medium", "low"]
 
 SEV_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3}
@@ -37,6 +39,23 @@ class Finding(BaseModel):
     exploit_steps: list[str]
     falsification: str = ""
     confidence: float = Field(0.5, ge=0, le=1)
+    # profit | disruption | unclear: does the attacker END UP WITH MORE value than they started with
+    # (kb/FINDING_TIERS.md). attacker_gain is the equity accounting in one line, or "none".
+    value_flow: str = "unclear"
+    attacker_gain: str = ""
+
+    @field_validator("value_flow", mode="before")
+    @classmethod
+    def _tier_is_normalised(cls, v):
+        return _norm_tier(v)
+
+    @model_validator(mode="after")
+    def _profit_must_state_its_gain(self):
+        # A profit claim with no stated gain is an unfinished accounting, not a profit: downgrade it
+        # rather than drop the finding (a dropped finding is lost recall).
+        if self.value_flow == "profit" and not stated_gain(self.attacker_gain):
+            self.value_flow = "unclear"
+        return self
 
     @field_validator("observation", "invariant", "violation", mode="before")
     @classmethod
@@ -58,6 +77,15 @@ class Verdict(BaseModel):
     # citation, so a kill can be checked by the same citation gate the findings go through.
     # A kill must cite the guard that kills it.
     disproof_location: str = ""
+    # The judge's own recomputation of the equity test; None = the judge did not say.
+    value_flow: str | None = None
+
+    @field_validator("value_flow", mode="before")
+    @classmethod
+    def _blank_tier_is_none(cls, v):
+        if v is None or (isinstance(v, str) and v.strip().lower() in ("", "null", "none")):
+            return None
+        return _norm_tier(v)
 
     @model_validator(mode="after")
     def _kill_must_cite_its_disproof(self):

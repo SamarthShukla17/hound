@@ -51,7 +51,11 @@ def system(kb, scope=None) -> str:
     """Shared system prompt: role, the run's impact ladder, kb.principles verbatim, the run's
     SCOPE RULES, evidence rules. `scope` is a Scope (or rules text); default is contest."""
     sc = as_scope(scope)
-    return "\n\n".join([ROLE_PROMPT, sc.ladder, kb.principles, sc.text, EVIDENCE_RULES])
+    parts = [ROLE_PROMPT, sc.ladder, kb.principles, sc.text, EVIDENCE_RULES]
+    tiers = getattr(kb, "tiers", "")
+    if tiers:
+        parts.insert(2, tiers)
+    return "\n\n".join(parts)
 
 
 def _map_block(pmap) -> str:
@@ -138,7 +142,12 @@ async def hunter(
         "arithmetic they perform, the control flow they take. NO consequence.\n"
         "  2. invariant — the protocol property those lines are supposed to maintain.\n"
         "  3. violation — the specific input or call sequence that breaks that property, cited.\n"
-        "  4. impact — what follows FROM the violation. It must be derivable from 1-3 alone.\n\n"
+        "  4. impact — what follows FROM the violation. It must be derivable from 1-3 alone.\n"
+        "  5. value_flow + attacker_gain — run the equity test from the FINDING TIERS section: what does the "
+        "attacker hold before and after, net of everything they pay? value_flow is profit ONLY if they end with "
+        "strictly more (name whose loss it is, with numbers in attacker_gain); disruption if the protocol or others "
+        "are harmed but the attacker does not come out ahead (attacker_gain: none); unclear if you could not "
+        "finish the accounting.\n\n"
         "If you cannot derive the impact from your own observation and invariant, lower the "
         "severity or return nothing. Do not assert theft, minting, draining or locking unless you "
         "traced the value movement in the cited code. The most common failure is naming the right "
@@ -147,7 +156,8 @@ async def hunter(
         '"severity": "critical|high|medium|low", "bug_class": "...", '
         '"location": "path:line-or-range", "observation": "...", "invariant": "...", '
         '"violation": "...", "root_cause": "summary of observation + invariant + violation", '
-        '"impact": "...", "exploit_steps": ["..."], "falsification": "...", "confidence": 0.5}]}'
+        '"impact": "...", "exploit_steps": ["..."], "falsification": "...", "confidence": 0.5, '
+        '"value_flow": "profit|disruption|unclear", "attacker_gain": "one line with numbers, or none"}]}'
     )
     user = _user_prompt(code, map_block, notes_block, known_block, killed_block, already_block, lens_block, task)
 
@@ -216,7 +226,11 @@ async def judge(
         "If you kill it, you MUST cite where the disproof lives in disproof_location, as "
         "path:line or path:start-end (the modifier, require, or guard that defeats the exploit). "
         "A kill you cannot cite is not a kill — use needs_poc instead.\n"
-        "3. Only if no disproof survives, the reasoning is coherent end to end, and the finding is "
+        "3. Recompute the equity test from the FINDING TIERS section yourself and report the tier in value_flow: "
+        "does the attacker end with strictly more value than they started with (profit), or is the protocol or "
+        "someone else harmed with no attacker gain (disruption)? Do not just repeat the candidate's claim. A "
+        "high/critical severity resting on disruption alone needs a permanent freeze or insolvency; otherwise lower it.\n"
+        "4. Only if no disproof survives, the reasoning is coherent end to end, and the finding is "
         "in scope under the SCOPE RULES above: verdict = keep. Apply those rules exactly as written; "
         "do not add exclusions of your own.\n\n"
         "If the logic holds but hinges on a runtime value you cannot see here (deploy config, "
@@ -224,7 +238,8 @@ async def judge(
         "answer, not a hedge — it routes the candidate to a human instead of silently killing it.\n\n"
         'Return ONLY this JSON shape: {"verdict": "keep|kill|needs_poc", "reason": "...", '
         '"severity": "critical|high|medium|low or null", "killed_by": "...", '
-        '"disproof_location": "path:line (REQUIRED when verdict is kill, else empty)"}'
+        '"disproof_location": "path:line (REQUIRED when verdict is kill, else empty)", '
+        '"value_flow": "profit|disruption|unclear"}'
     )
     user = _user_prompt(code, map_block, notes_block, known_block, killed_block, cand_block, task)
 

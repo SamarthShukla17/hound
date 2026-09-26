@@ -89,3 +89,41 @@ directory passed to the skill.
 **Fix:** Add a scope-verification pre-flight step: after the Pashov skill produces
 findings, check that every finding's file path is within the configured scope glob.
 If >50% of findings reference out-of-scope files, abort and report the scope mismatch.
+
+
+---
+
+## Update: profit-vs-disruption classification (contest-A follow-up hunt)
+
+**What changed the assessment.** The first pass hunted "what breaks" and produced a family of findings
+that all disrupted the protocol (a limit defeated, a consistency check tripped, a function reverting). A second pass asked one explicit question instead - *does the attacker end with more
+value than they started with, taken from someone else?* - and answered it with equity accounting, not
+intuition. Three things followed that the disruption lens had missed or overstated:
+
+- One mechanism that looked like theft had an attacker equity change of **exactly zero at par**: it was
+  disruption, with a profit that exists only if an external price later differs from the protocol's
+  assumption. It was reclassified, and its severity lowered, on that basis.
+- One mechanism was a
+  **real, quantified profit at another user's expense** that the disruption lens had never surfaced.
+- A "self-liquidation profit" hypothesis had a **negative** equity change (the penalty) and died in one
+  test.
+
+**Now structural.** Every finding carries `value_flow` (profit | disruption | unclear) and
+`attacker_gain` (the equity accounting in one line). The definition and the equity test live in
+`kb/FINDING_TIERS.md` and are in every hunter and judge system prompt; the judge recomputes the tier
+instead of trusting the candidate; `hound/tiers.py` flags a high/critical severity that its tier does
+not support (a disruption finding with no permanent-freeze, theft or insolvency claim; a profit
+finding with no quantified gain). A profit claim with no stated gain is downgraded to `unclear`, never
+dropped: a dropped finding is lost recall.
+
+**Read the tier counts in `report.md` first.** A run whose findings are all `disruption` or
+`unclassified` has not been hunted for profit; rerun with attention on value flow, not more lenses.
+
+## Update: things a scan can now do that the contest-A run had to do by hand
+
+| Capability | Command / flag | What it found or closed in practice |
+|---|---|---|
+| Literal upstream diff | `hound diff`, `scan --upstream` | The deviations from the upstream (a dropped division, a changed level ordering, a renamed factor, removed functions); closed a "regression?" thread with the upstream source as proof |
+| Deploy/config cross-check | `hound config-check`, `scan --config-check` | A configured floor that the quantity it bounds could never reach; a premium parameter far thinner than the upstream's; several parameters left on defaults |
+| Coverage gaps | `hound coverage`, `scan --coverage` | Untested state-transition branches (auction bookkeeping, liquidation dust rules) ranked above trivial guards |
+| Chained findings | `hound chain RUN_DIR` | Mechanical check that two findings on one mechanism do not combine into a profit |

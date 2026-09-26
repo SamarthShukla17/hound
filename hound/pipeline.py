@@ -17,6 +17,7 @@ from .codebase import build_provenance, check_provenance, chunk, load, rel_path
 from .knowledge import load_kb, poc_refs, select
 from .deviation_review import gather_text_for_detection, hunter_notes, resolve_upstream, upstream_diff, write_artifacts
 from . import config_check as cfgchk
+from .tiers import tier_of, tier_warning
 from . import coverage_gap as covgap
 from .config_extract import find_config_files
 from .upstream import load_registry
@@ -529,6 +530,8 @@ async def _scan(args) -> int:
     for c in deduped:
         entry = dict(c)
         entry["verdict"] = verdicts[c["id"]].model_dump()
+        entry["tier"] = tier_of(c, verdicts[c["id"]])
+        entry["tier_warning"] = tier_warning(c, _severity_for_report(c, verdicts[c["id"]]), entry["tier"])
         entry["hard_kill"] = c["id"] in hard_ids
         if c["id"] in poc_paths:
             entry["poc_path"] = str(poc_paths[c["id"]])
@@ -557,6 +560,16 @@ async def _scan(args) -> int:
     return 0
 
 
+def _tier_line(c: dict, v: Verdict) -> str:
+    """`PROFIT (+50.7 STABLE ...)` / `DISRUPTION` / `UNCLASSIFIED`, plus any severity-vs-tier warning."""
+    tier = tier_of(c, v)
+    label = {"profit": "PROFIT", "disruption": "DISRUPTION", "unclear": "UNCLASSIFIED (equity accounting not completed)"}[tier]
+    gain = str(c.get("attacker_gain") or "").strip()
+    text = f"{label} - attacker gain: {gain}" if gain and tier != "unclear" else label
+    warn = tier_warning(c, _severity_for_report(c, v), tier)
+    return f"{text}  !! {warn}" if warn else text
+
+
 def _detail_section(c: dict, v: Verdict, files, judge_label: str) -> list:
     lines = [
         f"## {c['id']} — {c['title']}",
@@ -564,6 +577,7 @@ def _detail_section(c: dict, v: Verdict, files, judge_label: str) -> list:
         f"- {judge_label}: {v.verdict}",
         f"- Severity: {_severity_for_report(c, v)} (hunter said {c['severity']})",
         f"- Bug class: {c.get('bug_class', '')}",
+        f"- Tier: {_tier_line(c, v)}",
         f"- Location: {c['location']}",
         f"- Votes: {c.get('votes', 1)} (lenses: {', '.join(c.get('lenses', []))})",
         "",
@@ -618,14 +632,18 @@ def _render_report(target, deduped, verdicts, files, judge_mode="advisory", hard
         )
         head, judge_label = "verdict", "Verdict"
 
+    tiers = [tier_of(c, verdicts[c["id"]]) for c in live]
     lines += [
-        f"| id | {head} | severity | votes | lenses | title | location |",
-        "|---|---|---|---|---|---|---|",
+        f"Tiers: {tiers.count('profit')} profit, {tiers.count('disruption')} disruption, "
+        f"{tiers.count('unclear')} unclassified (profit = attacker ends with more value; see kb/FINDING_TIERS.md).",
+        "",
+        f"| id | {head} | severity | tier | votes | lenses | title | location |",
+        "|---|---|---|---|---|---|---|---|",
     ]
     for c in ordered:
         v = verdicts[c["id"]]
         lines.append(
-            f"| {c['id']} | {v.verdict} | {_severity_for_report(c, v)} | {c.get('votes', 1)} | "
+            f"| {c['id']} | {v.verdict} | {_severity_for_report(c, v)} | {tier_of(c, v)} | {c.get('votes', 1)} | "
             f"{', '.join(c.get('lenses', []))} | {c['title']} | {c['location']} |"
         )
     lines.append("")
