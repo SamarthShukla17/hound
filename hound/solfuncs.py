@@ -38,6 +38,7 @@ class SolFunc:
     body: str  # text between the braces ('' for a declaration without a body)
     has_body: bool = True
     modifiers: list = field(default_factory=list)
+    body_line: int = 0  # 1-based line of the opening brace; body text starts on this line
 
     @property
     def key(self) -> str:
@@ -129,6 +130,29 @@ def _header_end(text: str, start: int):
     return len(text), ";"
 
 
+_NOT_MODIFIERS = set(_VISIBILITY + _MUTABILITY) | {"returns", "override", "virtual", "memory", "storage", "calldata"}
+
+
+def _header_modifiers(tail: str) -> list:
+    """Modifier invocations in a function header tail, arguments kept: `onlyRole(_WARD_ROLE)`,
+    `isStopped(3)`, `nonReentrant`. The returns(...) clause is dropped first."""
+    m = re.search(r"\breturns\s*\(", tail)
+    if m:
+        depth, j = 0, m.end() - 1
+        while j < len(tail):
+            depth += tail[j] == "("
+            depth -= tail[j] == ")"
+            if depth == 0:
+                break
+            j += 1
+        tail = tail[:m.start()] + " " + tail[j + 1:]
+    mods = []
+    for mm in re.finditer(r"([A-Za-z_]\w*)\s*(\([^()]*\))?", tail):
+        if mm.group(1) not in _NOT_MODIFIERS:
+            mods.append(mm.group(1) + ("".join(mm.group(2).split()) if mm.group(2) else ""))
+    return mods
+
+
 def contracts(source: str) -> list:
     """[(kind, name, body_start, body_end)] for every top-level contract/library/interface."""
     text = mask(source)
@@ -179,13 +203,13 @@ def find_functions(source: str) -> list:
             words = re.findall(r"[A-Za-z_]\w*", tail)
             vis = next((w for w in words if w in _VISIBILITY), "public" if kw == "function" else "")
             mut = next((w for w in words if w in _MUTABILITY), "")
-            mods = [w for w in words if w not in _VISIBILITY + _MUTABILITY + ("returns", "override", "virtual")][:6]
+            mods = _header_modifiers(tail)
             result.append(
                 SolFunc(
                     contract=cname, kind=kw, name=name, header=" ".join(header.split()), params=params,
                     visibility=vis, mutability=mut, start_line=_line_of(starts, m.start()),
                     end_line=_line_of(starts, end), body=source[hend + 1:end] if has_body else "",
-                    has_body=has_body, modifiers=mods,
+                    has_body=has_body, modifiers=mods, body_line=_line_of(starts, hend),
                 )
             )
             pos = end + 1

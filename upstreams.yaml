@@ -1,0 +1,71 @@
+# Known upstream projects a target may be a fork of.
+#
+# Data, not code: hound/upstream.py reads this to (a) detect from the target's own README/docs and
+# source comments that it derives from a known project, (b) fetch the real upstream source and (c)
+# pair contracts/functions for the literal diff. `reference_params` are the upstream's real deployed
+# or governance-approved values, used by the config cross-check as a comparison baseline.
+#
+# detect:       regexes matched (case-insensitive) against README/docs text and source comments.
+#               `min_hits` distinct patterns must match, so one stray word never triggers a fetch.
+# sources:      GitHub raw files to fetch: repo, ref, and file paths inside the repo.
+# contract_hints:   target contract name -> upstream contract names it was derived from.
+# function_aliases: target function name -> upstream function name, when the fork renamed it.
+# reference_params: {contract, param, value, context, source} rows for the config cross-check.
+
+upstreams:
+  maker-dss:
+    name: MakerDAO dss
+    min_hits: 2
+    detect:
+      - 'makerdao|maker\s*dao|\bdss\b|multi-collateral dai'
+      - '\bvat\b|\bvow\b|\bjug\b'
+      - '\bclip(per)?\b|\bdog\b|\bfrob\b|\bbark\b|\bskim\b|\bthaw\b'
+      - '\brpow\b|\brmul\b|\bwad\b[^\n]{0,40}\bray\b|\bray\b[^\n]{0,40}\brad\b'
+    sources:
+      - repo: makerdao/dss
+        ref: master
+        files: [src/vat.sol, src/jug.sol, src/dog.sol, src/clip.sol, src/end.sol, src/vow.sol, src/spot.sol, src/join.sol, src/abaci.sol]
+      - repo: makerdao/osm
+        ref: master
+        files: [src/osm.sol]
+    contract_hints:
+      VaultEngine: [Vat, Jug]
+      LiquidationTrigger: [Dog]
+      DutchAuction: [Clipper]
+      End: [End]
+      BalanceSheet: [Vow]
+      CollateralAdapter: [GemJoin, DaiJoin]
+      PriceConverter: [Spotter]
+      OracleSecurityModule: [OSM]
+      PriceCurve: [LinearDecrease, StairstepExponentialDecrease]
+    function_aliases:
+      skip: snip
+      fold: drip
+    reference_params:
+      - {contract: Clipper, param: buf, value: "1.3", context: "ETH-A, WBTC-A, ETH-C Liquidations 2.0 launch polls (April 2021)", source: "https://github.com/makerdao/community/blob/master/governance/polls/Add%20ETH-A%20to%20Liquidations%202.0%20Framework%20-%20April%2026,%202021.md"}
+      - {contract: Clipper, param: tail, value: "8400", context: "seconds; launch polls", source: "https://github.com/makerdao/community/blob/master/governance/polls/Add%20ETH-A%20to%20Liquidations%202.0%20Framework%20-%20April%2026,%202021.md"}
+      - {contract: Clipper, param: cusp, value: "0.4", context: "launch polls", source: "https://github.com/makerdao/community/blob/master/governance/polls/Add%20ETH-A%20to%20Liquidations%202.0%20Framework%20-%20April%2026,%202021.md"}
+      - {contract: Clipper, param: chip, value: "0.001", context: "0.1% kick incentive; launch polls", source: "https://github.com/makerdao/community/blob/master/governance/polls/Add%20ETH-A%20to%20Liquidations%202.0%20Framework%20-%20April%2026,%202021.md"}
+      - {contract: Clipper, param: tip, value: "0", context: "flat kick incentive; launch polls", source: "https://github.com/makerdao/community/blob/master/governance/polls/Add%20ETH-A%20to%20Liquidations%202.0%20Framework%20-%20April%2026,%202021.md"}
+      - {contract: OSM, param: hop, value: "3600", context: "seconds; osm.sol default ONE_HOUR", source: "https://github.com/makerdao/osm/blob/master/src/osm.sol"}
+
+  openzeppelin:
+    name: OpenZeppelin Contracts
+    vendored_only: true   # only diff files the target ships itself (same basename), never node_modules
+    min_hits: 1
+    detect:
+      - 'openzeppelin'
+    sources:
+      - repo: OpenZeppelin/openzeppelin-contracts
+        ref: master
+        files:
+          - contracts/token/ERC20/ERC20.sol
+          - contracts/token/ERC20/utils/SafeERC20.sol
+          - contracts/access/AccessControl.sol
+          - contracts/access/Ownable.sol
+          - contracts/utils/ReentrancyGuard.sol
+          - contracts/utils/math/Math.sol
+          - contracts/utils/math/SafeCast.sol
+    contract_hints: {}
+    function_aliases: {}
+    reference_params: []

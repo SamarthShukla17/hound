@@ -66,6 +66,12 @@ def _cmd_kill(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_diff(args: argparse.Namespace) -> int:
+    from .deviation_review import diff_command
+
+    return asyncio.run(diff_command(args))
+
+
 def _cmd_check(args: argparse.Namespace) -> int:
     from .llm import check
 
@@ -116,6 +122,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--scope-rules", dest="scope_rules", default=None, metavar="FILE",
         help="the target's actual README scope text; overrides --scope-profile",
     )
+    scan.add_argument(
+        "--upstream", default="auto", metavar="auto|off|NAME",
+        help="literal diff against a known upstream (upstreams.yaml): auto (default) detects it from the target's "
+             "README/comments, off skips it, or name one (e.g. maker-dss). Needs network on first use (cached).",
+    )
+    scan.add_argument("--max-diff-pairs", dest="max_diff_pairs", type=int, default=40,
+                      help="review at most this many function pairs with an LLM (default: 40)")
     scan.add_argument("--dry-run", dest="dry_run", action="store_true")
     scan.add_argument("--out", default="runs", help="output directory (default: runs)")
     scan.set_defaults(handler=_cmd_scan)
@@ -179,6 +192,18 @@ def build_parser() -> argparse.ArgumentParser:
     kill.add_argument("finding_id")
     kill.add_argument("reason")
     kill.set_defaults(handler=_cmd_kill)
+
+    diff = sub.add_parser(
+        "diff", help="literal statement-level diff of a fork against its real upstream source (no hunting)"
+    )
+    diff.add_argument("target", help="path to the target codebase")
+    diff.add_argument("--upstream", default="auto", metavar="auto|NAME", help="auto (default) or a name from upstreams.yaml")
+    diff.add_argument("--kb", default="kb")
+    diff.add_argument("--scope", default=None, help="scope file: one glob per line")
+    diff.add_argument("--max-pairs", dest="max_pairs", type=int, default=40, help="max function pairs sent to the reviewer")
+    diff.add_argument("--no-llm", dest="no_llm", action="store_true", help="deterministic diff only, no model calls")
+    diff.add_argument("--out", default="runs")
+    diff.set_defaults(handler=_cmd_diff)
 
     check = sub.add_parser("check", help="ping each role's first fallback target")
     check.add_argument("--paid", action="store_true", help="also probe x402 providers (spends real money)")

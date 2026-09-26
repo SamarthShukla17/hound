@@ -15,6 +15,8 @@ from pathlib import Path
 from .agents import diagnose, hunter, judge, mapper, poc
 from .codebase import build_provenance, check_provenance, chunk, load, rel_path
 from .knowledge import load_kb, poc_refs, select
+from .deviation_review import gather_text_for_detection, hunter_notes, resolve_upstream, upstream_diff, write_artifacts
+from .upstream import load_registry
 from .llm import OutOfCredits, Router, parse_cache_any_model
 from .runs import CITATION_GATE, STALE_CITATION, is_hard_kill, read_findings, write_findings
 from .scope import DEFAULT_PROFILE, resolve_scope
@@ -309,9 +311,17 @@ async def _scan(args) -> int:
     print(f"scope profile: {scope.name} ({scope.source})")
     print(f"judge mode: {judge_mode}" + (" (judge annotates; nothing it says removes a candidate)" if judge_mode == "advisory" else " (judge kills are removed from the default scored set)"))
 
+    up_choice = getattr(args, "upstream", "off")
     if args.dry_run:
         for lens in lenses:
             print(f"  {lens.id:4} {lens.kind:8} {lens.title}")
+        if up_choice != "off":
+            try:
+                found = resolve_upstream(up_choice, gather_text_for_detection(args.target, files), load_registry())
+            except ValueError as exc:
+                print(f"upstream: {exc}")
+                return 1
+            print(f"upstream diff: {found.name + ' detected (will fetch its source and review up to ' + str(getattr(args, 'max_diff_pairs', 40)) + ' function pairs)' if found else 'no known upstream detected'}")
         return 0
 
     router = Router(
@@ -353,6 +363,29 @@ async def _scan(args) -> int:
         json.dumps({"provenance": provenance_all, "map": merged_map}, indent=2, sort_keys=True)
     )
 
+    # --- UPSTREAM DIFF ---
+    # A fork is compared against the REAL upstream source, statement by statement, before any
+    # hunting: the deviations become the hunters' starting points. Failure never stops a scan.
+    hunt_notes = notes_text
+    if up_choice != "off":
+        try:
+            udiff = await upstream_diff(
+                args.target, files, choice=up_choice, router=router, kb_dir=args.kb,
+                max_pairs=getattr(args, "max_diff_pairs", 40),
+            )
+        except (ValueError, OSError) as exc:
+            print(f"upstream diff skipped: {exc}")
+            udiff = None
+        if udiff is None:
+            print("upstream diff: no known upstream detected" if up_choice == "auto" else "upstream diff: off")
+        else:
+            write_artifacts(run_dir, udiff)
+            note_block = hunter_notes(udiff)
+            hunt_notes = "\n\n".join(x for x in (notes_text, note_block) if x)
+            n_pairs = len(udiff.result.get("pairs", []))
+            print(f"upstream diff vs {udiff.upstream_name}: {n_pairs} pairs, {len(udiff.reviews)} reviewed"
+                  + (f", {len(udiff.fetch_failures)} fetch failures" if udiff.fetch_failures else ""))
+
     # --- HUNT ---
     # TODO(step 8): thread hound.corpus.recent() through as `killed` once it exists.
     killed_text = ""
@@ -367,7 +400,7 @@ async def _scan(args) -> int:
         tasks = [
             hunter(
                 router, kb, lens, c, pmap=map_text, known=known_text, killed=killed_text, already=already,
-                temp=temp, scope=scope, notes=notes_text,
+                temp=temp, scope=scope, notes=hunt_notes,
             )
             for c in chunks
             for lens in lenses

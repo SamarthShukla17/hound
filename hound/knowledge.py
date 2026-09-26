@@ -151,6 +151,17 @@ def load_kb(directory) -> KB:
     return KB(principles=principles, lenses=[*class_lenses, *angle_lenses, *pattern_lenses])
 
 
+def load_doc(directory, name: str, required: bool = False) -> str:
+    """Text of a standalone kb document (e.g. DEVIATION_REVIEW.md). These are prompt material for
+    a specific feature, not lenses, so they are returned whole. Missing -> '' unless required."""
+    try:
+        return _find_file(Path(directory), name).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        if required:
+            raise
+        return ""
+
+
 def select(lenses, spec: str):
     """"all" | kinds "A,P" | ids "A1,P4". A single-letter token selects a kind
     prefix (all ids starting with that letter); anything else must match an
