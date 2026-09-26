@@ -1,16 +1,17 @@
 # MOSTLY FREE. mapper/hunter/poc run on free models (zai glm-4.7-flash, then the pinned
 # cohere/north-mini-code:free).
-# judge and scorer run on ONE paid model — openrouter z-ai/glm-5.3-flash (~$0.05/$0.17 per M
-# tokens; OpenRouter credit, a few dollars covers many scans) — with free zai glm-4.7-flash as
-# fallback. No random model router is used anywhere: every model is pinned by name, so runs
-# with the same seed are replicates. A judge/scorer must be a fixed, capable model. The other paid
-# targets (gpt-5.6-luna, grok-4.6) stay commented out below. Rate limits are the main
-# constraint on the free roles: Z.ai free is ~1 req/sec with a daily cap and 429s under load;
-# OpenRouter free is ~20 req/min with a low daily cap.
+# judge now runs on openai/gpt-5.6-luna (paid), falling back to free zai glm-4.7-flash, then
+# paid openrouter z-ai/glm-5.3-flash (~$0.09/$0.30 per M tokens) — changed 2026-09-24 after
+# glm-5.3-flash as judge primary was found reconstructing arguments it had already refuted.
+# judge2 (dissent) is enabled on xai grok-4.6. scorer still runs on openrouter z-ai/glm-5.3-flash.
+# No random model router is used anywhere: every model is pinned by name, so runs with the
+# same seed are replicates. A judge/scorer must be a fixed, capable model. Rate limits are the
+# main constraint on the free roles: Z.ai free is ~1 req/sec with a daily cap and 429s under
+# load; OpenRouter free is ~20 req/min with a low daily cap.
 #
 # Model IDs, free tiers, and prices change often — verify each one on its provider's
 # page before relying on it. This file is a starting point, not a guarantee.
-# Last checked 2026-09-16.
+# Last checked 2026-09-24.
 
 # hound is cloud-only. Local mode (Ollama) was removed after measuring 0.09 tok/s for a
 # 14B-class model and 28 tok/s for 7B on a 16 GB M5 Air — Metal only exposes ~11.8 GiB there,
@@ -73,7 +74,12 @@ providers:
 # usage at the cap logs "TRUNCATED BY max_tokens" naming the role to raise. These are also
 # the code defaults (llm.DEFAULT_MAX_TOKENS); a target may override with its own max_tokens.
 max_tokens:
-  mapper: 8000
+  # 16000, raised from 8000 on 2026-09-24. MEASURED, not guessed: on the contest-a scan
+  # (20 files / 4252 lines / 1 chunk) the mapper hit the 8000 ceiling exactly — completion
+  # 8000/8000, finish_reason=length, "TRUNCATED BY max_tokens" — and emitted a 3.4KB map.json
+  # for a 20-contract system. Mean across its 2 calls was 6199, so 8000 left no headroom on
+  # a corpus this size. A truncated map degrades EVERY hunter call, since all of them read it.
+  mapper: 16000
   hunter: 20000
   judge: 24000
   judge2: 24000
@@ -127,20 +133,23 @@ roles:
     - {provider: openrouter, model: z-ai/glm-4.7-flash, extra: {extra_body: {reasoning: {enabled: false}}}}
     - {provider: zai, model: glm-4.7-flash, extra: {extra_body: {thinking: {type: disabled}}}}
 
-  # Temperature is already 0 for judge calls (see agents.judge). PAID primary, free fallback.
+  # Temperature is already 0 for judge calls (see agents.judge). PAID primary
+  # (openai/gpt-5.6-luna), FREE first fallback (zai/glm-4.7-flash direct), PAID second
+  # fallback (openrouter z-ai/glm-5.3-flash) — changed 2026-09-24 after glm-5.3-flash as
+  # primary produced verdicts that reconstructed arguments the judge had already refuted.
+  # NOTE: as of 2026-09-23 the OpenAI account was out of credit, which would make every
+  # primary call fail closed to the first fallback — recheck credit before relying on
+  # gpt-5.6-luna actually being reached.
   # z-ai/glm-5.3-flash has MANDATORY reasoning (a reasoning-off extra 400s: "Reasoning is
   # mandatory for this endpoint"), so no extra here — its thinking counts against max_tokens.
   judge:
-    - {provider: openrouter, model: z-ai/glm-5.3-flash}
+    - {provider: openai, model: gpt-5.6-luna, extra: {reasoning_effort: high}}
     - {provider: zai, model: glm-4.7-flash, extra: {extra_body: {thinking: {type: disabled}}}}
-    # PAID, re-enable later:
-    # - {provider: openai, model: gpt-5.6-luna, extra: {reasoning_effort: high}}
+    - {provider: openrouter, model: z-ai/glm-5.3-flash}
 
-  # NO TARGET on purpose: a random free model is not a second opinion. With judge2 empty the
-  # pipeline skips it, so a run is single-judge and there is NO DISSENT SIGNAL until a real
-  # second model is configured. Re-enable once the xAI key exists:
-  judge2: []
-    # - {provider: xai, model: grok-4.6}
+  # Dissent (second judge opinion), enabled 2026-09-24 now that the xAI key exists.
+  judge2:
+    - {provider: xai, model: grok-4.6}
 
   # PoC text is not measured by recall, so a fallback is harmless here; the pinned model leads
   # because zai was 429-storming and lost 6 PoCs to it on 2026-09-20.
@@ -179,9 +188,8 @@ prices:
   glm-4.7-flash: [0, 0]
   z-ai/glm-4.7-flash: [0.061, 0.400]
   z-ai/glm-5.3-flash: [0.09, 0.30]
-  # PAID, re-enable with the targets above:
-  # gpt-5.6-luna: [0.20, 1.20]
-  # grok-4.6: [2.0, 6.0]
+  gpt-5.6-luna: [0.20, 1.20]
+  grok-4.6: [2.0, 6.0]
 
 budget:
   monthly_usd: 20
