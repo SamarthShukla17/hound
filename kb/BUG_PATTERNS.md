@@ -223,4 +223,57 @@ known → dead.
 
 
 
+---
+
+## Pattern 7 — Permissionless gateway bypass
+
+**Shape:** A module (the "gateway") is the INTENDED entry point for an action. It enforces
+side-effects: accounting or reserve updates, solvency or role checks, fee collection. The
+lower-level ledger operation underneath is permissionless and does not enforce those
+side-effects, because it was designed for a different class of asset or position. Calling the
+ledger directly produces the same state change without the gateway's side-effects, so the
+gateway's bookkeeping drifts from the ledger's.
+
+**Spot it:** a high-level module that wraps a lower-level call AND adds side-effects. Check:
+can an unprivileged caller invoke the lower-level operation directly, on the same class and with
+the same parameters the gateway uses? Does the ledger treat the gateway's class like any other at
+the raw-operation level (no role gate, no allowlist)?
+
+**Key signals:**
+- The operation that creates or opens the position is permissionless for every class
+- A safety or solvency check in the ledger is conditional on the class (skipped for some)
+- The accounting layer lives in the gateway, not in the ledger
+- Classes with a fixed rate make the direct path cost-free for the attacker
+
+**Falsify fast:** Can a non-gateway address call the raw operation on the gateway's class? Does
+the ledger enforce any check on that path (allowlist, role gate, solvency check)? Does the ledger
+itself update the accounting layer, or only the gateway? If any of these blocks the path -> dead.
+
+**Impact class:** one counter (debt, supply) is inflated without the matching backing counter
+moving. Any invariant that compares the two can then fail permanently, so the usual impact is a
+griefing / permanent-lock, not theft. Cost to the attacker is near-zero when the class has a
+fixed rate.
+
+**PoC skeleton:**
+```solidity
+function test_gatewayBypass() public {
+    uint256 backingBefore = accounting.backing();
+    // attacker skips the gateway and uses the ledger's raw operations directly
+    ledger.open(GATEWAY_CLASS, attacker);
+    ledger.rawOperation(GATEWAY_CLASS, attacker, amount);
+    // the counter moved but the backing the gateway would have recorded did not
+    assertGt(ledger.counter(), accounting.counterSeen());
+    assertEq(accounting.backing(), backingBefore);
+    // a function that compares the two now fails
+    vm.expectRevert();
+    accounting.dependentFunction();
+}
+```
+
+**Meta:** This generalizes to any system where a privileged gateway wraps a permissionless
+ledger and the accounting invariant lives in the gateway layer only. The bug appears when a
+bookkeeping layer is added on top of a permissionless ledger without also adding ledger-level
+restrictions on the classes the gateway serves.
+---
+
 Pattern: Signature-digest incompleteness — a valid signature authorizes a transfer, but a security-critical field (recipient/destination token account, program id, chain) is NOT in the signed digest, so the submitter/facilitator substitutes it post-signature. Check: does the digest bind recipient + amount + mint + nonce + deadline + program-id + chain? Anything outside the hash is attacker-controllable.

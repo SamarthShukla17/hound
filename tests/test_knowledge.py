@@ -81,5 +81,8 @@ def test_load_kb_finds_files_recursively(tmp_path):
     for name in ("METHODOLOGY.md", "ATTACK_ANGLES.md", "BUG_PATTERNS.md"):
         (nested / name).write_text((KB_DIR / name).read_text(encoding="utf-8"), encoding="utf-8")
 
+    # The point is that the recursive lookup finds all three files and loses no lens; the expected
+    # count is whatever the kb itself parses to, so adding a pattern to kb/ never breaks this test.
     found = load_kb(tmp_path)
-    assert len(found.lenses) == 6 + 7 + 7
+    assert len(found.lenses) == len(load_kb(KB_DIR).lenses)
+    assert len(found.lenses) >= 6 + 7 + 7
