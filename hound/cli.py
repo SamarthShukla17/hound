@@ -72,6 +72,12 @@ def _cmd_diff(args: argparse.Namespace) -> int:
     return asyncio.run(diff_command(args))
 
 
+def _cmd_chain(args: argparse.Namespace) -> int:
+    from .chain import chain_command
+
+    return asyncio.run(chain_command(args))
+
+
 def _cmd_coverage(args: argparse.Namespace) -> int:
     from .coverage_gap import coverage_command
 
@@ -150,6 +156,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="rank functions whose branches the team's own tests never exercise and hand them to the hunters: auto "
              "(default) runs `forge coverage` in a foundry project, off skips, or give a precomputed lcov file",
     )
+    scan.add_argument(
+        "--chain", choices=["auto", "off"], default="auto",
+        help="after judging, test whether findings that share state combine into something larger (auto: on)",
+    )
+    scan.add_argument("--max-chain-pairs", dest="max_chain_pairs", type=int, default=12,
+                      help="review at most this many finding pairs with a model (default: 12)")
     scan.add_argument("--dry-run", dest="dry_run", action="store_true")
     scan.add_argument("--out", default="runs", help="output directory (default: runs)")
     scan.set_defaults(handler=_cmd_scan)
@@ -235,6 +247,14 @@ def build_parser() -> argparse.ArgumentParser:
     cfg.add_argument("--no-llm", dest="no_llm", action="store_true", help="deterministic table and flags only")
     cfg.add_argument("--out", default="runs")
     cfg.set_defaults(handler=_cmd_config_check)
+
+    chain = sub.add_parser("chain", help="test whether a finished run's findings combine into something larger")
+    chain.add_argument("run_dir")
+    chain.add_argument("--target", default=None, help="the scanned codebase (default: the run's recorded target)")
+    chain.add_argument("--kb", default="kb")
+    chain.add_argument("--max-pairs", dest="max_pairs", type=int, default=12)
+    chain.add_argument("--no-llm", dest="no_llm", action="store_true", help="only rank the candidate pairs")
+    chain.set_defaults(handler=_cmd_chain)
 
     cov = sub.add_parser("coverage", help="rank functions whose branches the team's tests never exercise (lead generation)")
     cov.add_argument("target", help="path to the target codebase")

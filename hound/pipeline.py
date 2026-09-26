@@ -16,6 +16,7 @@ from .agents import diagnose, hunter, judge, mapper, poc
 from .codebase import build_provenance, check_provenance, chunk, load, rel_path
 from .knowledge import load_kb, poc_refs, select
 from .deviation_review import gather_text_for_detection, hunter_notes, resolve_upstream, upstream_diff, write_artifacts
+from . import chain as chainmod
 from . import config_check as cfgchk
 from .tiers import tier_of, tier_warning
 from . import coverage_gap as covgap
@@ -543,6 +544,23 @@ async def _scan(args) -> int:
     )
 
     (run_dir / "report.md").write_text(_render_report(args.target, deduped, verdicts, files, judge_mode, hard_ids))
+
+    # --- CHAIN CHECK ---
+    # Two findings on one mechanism can combine into something neither is. Judge kills and gate
+    # kills are excluded: only findings still standing are worth spending model calls on.
+    if getattr(args, "chain", "off") != "off":
+        standing = [e for e in findings_out if not e["hard_kill"] and e["verdict"]["verdict"] != "kill"]
+        try:
+            cres = await chainmod.run(
+                standing, files, args.target, router=router, kb_dir=args.kb,
+                max_pairs=getattr(args, "max_chain_pairs", 12),
+            )
+        except (ValueError, OSError) as exc:
+            print(f"chain check skipped: {exc}")
+        else:
+            chainmod.write_artifacts(run_dir, cres, standing)
+            print(f"chain check: {len(standing)} standing findings, {len(cres.candidates)} pairs share state, "
+                  f"{len(cres.results)} reviewed, {len(chainmod.hits(cres))} chain(s) found")
 
     counts = {v: sum(1 for c in deduped if c["id"] not in hard_ids and verdicts[c["id"]].verdict == v)
               for v in ("keep", "kill", "needs_poc")}

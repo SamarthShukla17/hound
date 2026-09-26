@@ -16,7 +16,7 @@ _FUNC_RE = re.compile(r"\b(function|constructor|modifier|fallback|receive)\b\s*(
 _VISIBILITY = ("external", "public", "internal", "private")
 _MUTABILITY = ("view", "pure", "payable")
 _STATE_VAR_RE = re.compile(
-    r"^\s*(?P<type>mapping\s*\(.*?\)|[A-Za-z_][\w.]*(?:\[[^\]]*\])*)\s+"
+    r"(?:^|(?<=[;{}]))\s*(?P<type>mapping\s*\(.*?\)|[A-Za-z_][\w.]*(?:\[[^\]]*\])*)\s+"
     r"(?P<mods>(?:public|private|internal|immutable|constant|override)\s+)*"
     r"(?P<name>[A-Za-z_]\w*)\s*(?:=[^;]*)?;",
     re.MULTILINE | re.DOTALL,
@@ -252,3 +252,18 @@ def function_at(funcs: list, line: int):
     """The function whose line range contains `line` (innermost = smallest range), else None."""
     hits = [f for f in funcs if f.start_line <= line <= f.end_line]
     return min(hits, key=lambda f: f.end_line - f.start_line) if hits else None
+
+
+def written_state(func: SolFunc, state_vars: set) -> set:
+    """Which of `state_vars` the function body WRITES: assignment (including compound, indexed and
+    member forms), increment/decrement, delete, push/pop. A variable that is only read is not here."""
+    body = mask(func.body)
+    written = set()
+    for v in state_vars:
+        name = re.escape(v)
+        lhs = rf"\b{name}\b(?:\s*\[[^\]]*\])*(?:\s*\.\s*\w+)*"
+        if (re.search(rf"{lhs}\s*(?:=(?!=)|\+=|-=|\*=|/=|%=|\|=|&=|\^=|<<=|>>=)", body)
+                or re.search(rf"{lhs}\s*(?:\+\+|--)", body) or re.search(rf"(?:\+\+|--)\s*{lhs}", body)
+                or re.search(rf"\bdelete\s+{lhs}", body) or re.search(rf"\b{name}\b[^;]*?\.\s*(?:push|pop)\s*\(", body)):
+            written.add(v)
+    return written

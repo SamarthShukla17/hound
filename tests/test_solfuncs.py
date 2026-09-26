@@ -120,3 +120,15 @@ def test_function_at_returns_the_containing_function():
     inner_line = dep.start_line + 2
     assert function_at(funcs, inner_line).name == "deposit"
     assert function_at(funcs, 1) is None
+
+
+def test_written_state_separates_writes_from_reads():
+    from hound.solfuncs import written_state
+    funcs = {f.key: f for f in find_functions(SRC)}
+    names = state_variables(SRC)
+    assert written_state(funcs["Vault.deposit"], names) == {"balances", "total"}  # `balances[k] += ` and `total +=`
+    assert written_state(funcs["Vault.ping"], names) == set()  # reads total, writes nothing
+    src = "contract C { uint256 x; uint256 y; uint256[] q; function f() external { y = x + 1; x++; delete y; q.push(1); if (x == y) {} } }"
+    f = find_functions(src)[0]
+    assert written_state(f, state_variables(src)) == {"x", "y", "q"}
+    assert written_state(find_functions("contract C { uint256 x; function g() external { require(x == 2); } }")[0], {"x"}) == set()
