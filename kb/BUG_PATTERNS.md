@@ -276,4 +276,130 @@ bookkeeping layer is added on top of a permissionless ledger without also adding
 restrictions on the classes the gateway serves.
 ---
 
-Pattern: Signature-digest incompleteness — a valid signature authorizes a transfer, but a security-critical field (recipient/destination token account, program id, chain) is NOT in the signed digest, so the submitter/facilitator substitutes it post-signature. Check: does the digest bind recipient + amount + mint + nonce + deadline + program-id + chain? Anything outside the hash is attacker-controllable.
+## Pattern 8 — Signature-digest incompleteness
+
+a valid signature authorizes a transfer, but a security-critical field (recipient/destination token account, program id, chain) is NOT in the signed digest, so the submitter/facilitator substitutes it post-signature. Check: does the digest bind recipient + amount + mint + nonce + deadline + program-id + chain? Anything outside the hash is attacker-controllable.
+
+---
+
+## Pattern 9 — Proof verifier accepts a malformed, non-canonical or incomplete proof
+
+**Source (every claim below is cited; nothing here is derived from the target's current code):**
+SRLabs "Hyperbridge MMR Audit" v1.2, 2026-05-12 (§2, S4-4, S3-3, S3-6, S2-5, S1-7, S1-11, S1-16, §4);
+solidity-merkle-trees commit `6bbc83d` (MerkleMultiProof `UnconsumedLeaves`, #57) and its test
+`tests/foundry/MerkleMultiProof.t.sol`; rs-merkle commit `f14a8aa` (duplicate / out-of-bounds leaf
+indices) and its test `tests/duplicate_index_test.rs`; hyperbridge commit `7c1a2ac1` (#891).
+
+**Shape:** A verifier checks that the proof it was handed *reconstructs the root*, but not that the
+proof is *the* canonical proof for the claimed leaves. Anything the algorithm silently ignores is
+attacker-controlled input that never reaches the hash. Shapes this exact code family has already
+shipped (each is a falsification target, not a lead):
+- **Unconsumed input.** The walk returns as soon as it reaches the root, so extra or forged leaves
+  still in the working set are dropped (smt #57: "invariant: all leaves must have been consumed";
+  SRL §2 names this as the April 2026 exploit's root cause in the MMR verifier).
+- **Duplicate or unsorted leaf indices.** The same index repeated lets N claimed memberships ride on
+  one real path (SRL S4-4, rs-merkle `f14a8aa`); a caller that counts `votes.length` instead of
+  distinct signers turns that into a fake supermajority (SRL S4-4, BeefyV1 call site).
+- **Empty or short input.** `leaves = []` or an exhausted proof breaks out of the decomposition loop
+  instead of reverting, so the root is bagged from a partial peak set (SRL S1-11); a single-leaf
+  shortcut returns before looking at the rest of the proof (SRL S1-16).
+- **Extreme size parameters.** A caller-supplied `leafCount` above 2^255 makes `1 << ceilLog2(n)`
+  wrap to 0, so leaf positions equal raw indices (smt #57 test comment).
+- **Decoder diverges from the canonical encoding.** Inline (<32 byte) child references read as
+  absent (S3-3); an odd-nibble leaf path loses a nibble so two keys compare equal (S3-6); the
+  empty-trie constant is compared against the preimage instead of the hash (S2-5); absence is
+  returned as empty bytes, indistinguishable from a stored empty value (S1-7).
+- **Validation written as one `&&` chain.** Conditions that must each reject are joined so the
+  check only fires when all hold (hyperbridge #891, sync-committee verifier: the finality-branch
+  length check was skipped whenever the optional committee update was absent).
+- **Port drift.** The Rust reference enforced the invariant and the Solidity port did not (SRL §2,
+  §4.1). Compare the two implementations of the same algorithm line by line.
+
+**Spot it:** a function returning `bool`/root from `(root, proof, leaves, count)`; loops that end on
+`positions[0] == root` or on `proofIter` exhaustion with `break`; no post-condition asserting leaf
+cursor, proof cursor and peak cursor are all at their end; no strict-monotonic check on indices; a
+trie decoder with its own node-kind and path-parity logic instead of a vetted one.
+
+**Falsify fast:** take one honest proof and mutate it exactly once per shape: repeat a leaf, append a
+forged leaf, drop one proof element, append one extra proof element, empty the leaves, shrink or
+inflate the count, swap the empty value for absence. If every mutation reverts or returns false, the
+class is dead for that verifier. Then check the call site: does it derive `leaves` from verified
+data, and does it count distinct signers/indices itself?
+
+**Known-issue warning:** SRL S4-4, S3-3, S3-6, S2-5, S1-7, S1-11, S1-16 and the April 2026 MMR
+exploit are already fixed and public, and every hacker on this program has read them. A finding here
+only counts if it is a *variant the fixes do not cover*; say which fix it survives.
+
+**PoC skeletons:**
+```solidity
+// Foundry: mutate one honest proof, expect rejection (shape of smt tests/foundry/MerkleMultiProof.t.sol)
+function test_mutatedProofMustNotVerify() public {
+    // honest tree + honest proof for leaf a
+    assertTrue(Lib.VerifyProof(root, honestProof, honestLeaves, leafCount));
+    // mutation: forged extra leaf, or repeated leaf, or extra proof element, or leafCount > 2**255
+    vm.expectRevert(); // or assertFalse(Lib.VerifyProof(...)) for bool-returning verifiers
+    this.verifyExternal(root, mutatedProof, mutatedLeaves, mutatedCount);
+    // FINDING only if the mutated call returns true / returns a root without reverting
+}
+```
+```rust
+// cargo test: same mutation table (shape of rs-merkle tests/duplicate_index_test.rs)
+#[test]
+fn mutated_proof_must_not_verify() {
+    let (root, proof, leaves, count) = honest_fixture();
+    assert!(verify(root, &proof, &leaves, count).is_ok());
+    // repeat a leaf / append a forged leaf / drop or add one proof element / empty leaves / bad count
+    assert!(verify(root, &mutated_proof, &mutated_leaves, mutated_count).is_err());
+    // FINDING only if the mutated call is Ok
+}
+```
+
+---
+
+## Pattern 10 — Attacker-controlled input reaches a panic in a runtime, verifier or decoder path
+
+**Source:** hyperbridge commits `7c1a2ac1` (#891, "Fix consensus verifier panics"), `27667de9` (#967,
+Pharos validator count), `7548b25e` (#945, "replace panicking unwraps ... across runtime pallets and
+modules", 11 files), `dcba4713` (#955) and `04ad3141` (#1173) (the last two are node/relayer code,
+shown for the shape only); SRLabs "Hyperbridge ISMP baseline assurance" §6.3 (missing `DecodeLimit`),
+§6.12 (timeout overflow, fixed with `saturating_add`), §6.11 (unbounded loop).
+
+**Shape:** a length, count, index or optional field taken from an extrinsic, a proof or a consensus
+message is used without a bound: `.unwrap()` / `.expect()` / slice or index / `copy_from_slice` /
+`as` cast / `+` on integers / a loop or index advance driven by a claimed count. Cited instances:
+- `calculate_multi_merkle_root` unwrapped a lookup that a short `multi_proof` leaves empty, reachable
+  "via the public unsigned consensus update path" (#891 comment).
+- BSC header parsing sliced one byte past a length check that did not include the post-fork `turn`
+  byte (#891).
+- A validator count read from a storage proof drove a loop and an index advance with no cap and an
+  unchecked `idx += 1 + data_slots + 1` (#967).
+- Nested SCALE decoding with no depth limit (SRL §6.3) and an unbounded loop in an extrinsic (§6.11).
+
+**Spot it:** `unwrap`, `expect`, `[i]`, `[a..b]`, `copy_from_slice`, `as usize`/`as u64` and bare `+`/`-`/`*`
+inside functions reachable from `Call` dispatchables, `ValidateUnsigned`, hooks, `verify_consensus`,
+`verify_state_proof` or a `Decode` impl; any `for i in 0..count` where `count` comes from decoded input.
+
+**Falsify fast:** (1) is the value bounded or length-checked before the operation, in this function or a
+caller? (2) in which context does it run (a dispatchable after validation, `ValidateUnsigned`, a
+hook/inherent, an off-chain worker or node RPC)? A panic only matters for the thing it aborts, so state
+what that is and demonstrate it in the PoC rather than assert it. (3) is the weight charged for the
+work the input can cause? Out-of-scope check: tesseract, the node binary and RPC code are not runtime,
+pallet or contract code for this program.
+
+**Known-issue warning:** #891, #945, #967 and SRL §6.3, §6.11, §6.12 are fixed; the team swept the
+runtime for `unwrap` once. Only a path that sweep missed counts, so cite why the cited fixes do not
+cover it.
+
+**PoC skeleton:**
+```rust
+// cargo test: drive the real verifier/pallet function with the adversarial input; a panic fails the test
+#[test]
+fn adversarial_input_must_error_not_panic() {
+    new_test_ext().execute_with(|| {
+        let input = craft(/* short multi_proof | count = u64::MAX | truncated field | oversized nesting */);
+        let res = std::panic::catch_unwind(|| Pallet::<Test>::entry_point(origin(), input.clone()));
+        assert!(res.is_ok(), "panicked on attacker input");      // FINDING if this fails
+        assert!(res.unwrap().is_err(), "accepted malformed input");
+    });
+}
+```
