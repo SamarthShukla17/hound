@@ -40,6 +40,7 @@ def test_only_the_intended_paid_model_is_active():
     assert active_models <= {
         "glm-4.7-flash", "cohere/north-mini-code:free",
         "z-ai/glm-4.7-flash", "z-ai/glm-5.3-flash",
+        "z-ai/glm-5.3",
         "gpt-5.6-luna", "grok-4.6",
         "claude-sonnet-5", "o3",
     }
@@ -133,11 +134,19 @@ def test_diagnose_has_somewhere_to_fall_when_the_primary_burns_out():
     targets = config["roles"]["diagnose"]
     assert len(targets) >= 2, "diagnose must not be a single point of failure"
 
-    for t in targets[1:]:
+    def reasoning_is_off(t):
         extra = t.get("extra", {}).get("extra_body", {})
-        reasoning_off = extra.get("reasoning", {}).get("enabled") is False
-        thinking_off = extra.get("thinking", {}).get("type") == "disabled"
-        assert reasoning_off or thinking_off, f"fallback {t['model']} still has reasoning on"
+        return (extra.get("reasoning", {}).get("enabled") is False
+                or extra.get("thinking", {}).get("type") == "disabled")
+
+    # The immediate escape from a burned-out primary must be reasoning-off. Anything after a
+    # reasoning-off target may be a mandatory-reasoning model (z-ai/glm-5.3 cannot disable it): it is
+    # only reached once a reasoning-off target has already failed, so it cannot trap the role.
+    assert reasoning_is_off(targets[1]), f"first fallback {targets[1]['model']} still has reasoning on"
+
+    first_off = next(i for i, t in enumerate(targets[1:], start=1) if reasoning_is_off(t))
+    for t in targets[1:first_off]:
+        assert reasoning_is_off(t), f"fallback {t['model']} sits ahead of the first reasoning-off target"
 
 
 def test_diagnose_budget_fits_a_real_answer_without_funding_a_long_burn():

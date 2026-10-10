@@ -132,6 +132,11 @@ roles:
     - {provider: openrouter, model: z-ai/glm-5.3-flash}
     - {provider: openrouter, model: z-ai/glm-4.7-flash, extra: {extra_body: {reasoning: {enabled: false}}}}
     - {provider: zai, model: glm-4.7-flash, extra: {extra_body: {thinking: {type: disabled}}}}
+    # ALTERNATE (added 2026-10-04), deliberately LAST: the full glm-5.3 has MANDATORY reasoning (a reasoning-off
+    # extra 400s, checked 2026-10-04), so it shares the primary's burn failure mode and must never sit ahead of a
+    # reasoning-off target. It is reached only if all of the above fail. Not promoted: promotion needs a probe that
+    # clearly beats glm-5.3-flash.
+    - {provider: openrouter, model: z-ai/glm-5.3}
 
   # Temperature is already 0 for judge calls (see agents.judge). PAID primary
   # (openai/gpt-5.6-luna), FREE first fallback (zai/glm-4.7-flash direct), PAID second
@@ -188,6 +193,8 @@ prices:
   glm-4.7-flash: [0, 0]
   z-ai/glm-4.7-flash: [0.061, 0.400]
   z-ai/glm-5.3-flash: [0.09, 0.30]
+  # OpenRouter list price read 2026-10-04: $1.40 in / $4.40 out per M.
+  z-ai/glm-5.3: [1.4, 4.4]
   gpt-5.6-luna: [0.20, 1.20]
   grok-4.6: [2.0, 6.0]
 
