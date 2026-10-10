@@ -19,6 +19,16 @@ do the job.
 
 **Budget:** `--budget 240000` (chars per chunk) matches these models' ~128K context.
 
+## Known issue: `kb/` lens files are symlinks into a private sibling repo
+
+`kb/METHODOLOGY.md`, `kb/ATTACK_ANGLES.md` and `kb/BUG_PATTERNS.md` are symlinks to
+`../../../sol-sec-research/methodology/` (a private repo checked out next to this one), so the
+lenses stay in sync with the methodology. They are **not portable**: in any other checkout they
+are dangling links and `hound scan` will fail with `FileNotFoundError`. The other `kb/*.md`
+files are real files. If this harness is ever shared or open-sourced, replace the symlinks with
+a sync-copy step. Pattern ids P7-P10 changed meaning on 2026-10-10; runs before that date use the
+old numbering (table at the top of `kb/BUG_PATTERNS.md`).
+
 ## Known limitation
 
 **No offline mode.** Every scan sends code to a cloud API (zai, OpenRouter, OpenAI, or xAI,

@@ -59,8 +59,9 @@ Flags that matter:
   judge's opinion but keeps it in report.md regardless of verdict (recommended —
   lets you see and manually verify judge kills instead of losing them silently).
   strict drops anything the judge kills.
-- `--lenses <list>` — comma-separated subset of hunter lenses (angles A1-A7,
-  patterns P1-P7, classes C1-C6) instead of `all`. Cuts cost/time; use when you
+- `--lenses <list>` — comma-separated subset of hunter lenses (angles A1-A8,
+  patterns P1-P15, classes C1-C7; as of 2026-10-10 — the set is whatever `kb/` parses to.
+  P7-P10 were renumbered that day, see the PATTERN_MIGRATION table in `kb/BUG_PATTERNS.md`) instead of `all`. Cuts cost/time; use when you
   want a targeted re-scan rather than a full pass.
   Example: `--lenses A,P` runs every angle and pattern lens, skips classes.
 - `--passes N` — number of hunt passes (default varies by config). More passes,
