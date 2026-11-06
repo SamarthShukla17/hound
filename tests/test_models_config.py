@@ -31,13 +31,17 @@ def test_role_providers_exist():
 def test_only_the_intended_paid_model_is_active():
     config = load_models_config()
     active_models = {t["model"] for targets in config["roles"].values() for t in targets}
-    # gpt-5.6-luna and grok-4.6 stay commented out. glm-4.7-flash hunts (the only model
-    # measured to hunt productively) and glm-5.3-flash judges/scores. claude-sonnet-5 and o3
-    # are SCORER FALLBACKS ONLY: both accounts are out of credit, so they cost nothing today
-    # and take over automatically if either is funded. Every entry is pinned by name.
+    # glm-4.7-flash hunts (the only model measured to hunt productively) and glm-5.3-flash
+    # scores and diagnoses. gpt-5.6-luna is the JUDGE primary and grok-4.6 the judge2 (dissent)
+    # model, both deliberate since 2026-09-24 (glm-5.3-flash as judge primary reconstructed
+    # arguments the judge had already refuted). claude-sonnet-5 and o3 are SCORER FALLBACKS ONLY:
+    # both accounts were out of credit, so they cost nothing today and take over automatically if
+    # either is funded. Every entry is pinned by name.
     assert active_models <= {
         "glm-4.7-flash", "cohere/north-mini-code:free",
         "z-ai/glm-4.7-flash", "z-ai/glm-5.3-flash",
+        "z-ai/glm-5.3",
+        "gpt-5.6-luna", "grok-4.6",
         "claude-sonnet-5", "o3",
     }
 
@@ -63,12 +67,26 @@ def test_no_role_uses_a_random_model_router():
             assert t["model"] != "openrouter/free", f"{role} uses the random free router"
 
 
-def test_judge_is_glm_5_3_flash_then_zai_fallback():
+def test_judge_is_luna_then_zai_then_glm_5_3_flash():
+    """Judge order since 2026-09-24: PAID gpt-5.6-luna primary, FREE zai glm-4.7-flash first
+    fallback, PAID openrouter glm-5.3-flash second fallback. glm-5.3-flash as primary produced
+    verdicts that reconstructed arguments the judge had already refuted."""
     config = load_models_config()
     assert [(t["provider"], t["model"]) for t in config["roles"]["judge"]] == [
-        ("openrouter", "z-ai/glm-5.3-flash"),
+        ("openai", "gpt-5.6-luna"),
         ("zai", "glm-4.7-flash"),
+        ("openrouter", "z-ai/glm-5.3-flash"),
     ]
+
+
+def test_gpt_5_6_luna_is_judge_only():
+    """luna is paid, so it is only allowed in the judge role (where the 2026-09-24 decision put
+    it). Any other role using it is an unintended spend."""
+    config = load_models_config()
+    for role, targets in config["roles"].items():
+        for t in targets:
+            if t["model"] == "gpt-5.6-luna":
+                assert role == "judge", f"{role} must not use the paid gpt-5.6-luna"
 
 
 def test_the_scorer_offers_no_funded_alternative_grader():
@@ -116,11 +134,19 @@ def test_diagnose_has_somewhere_to_fall_when_the_primary_burns_out():
     targets = config["roles"]["diagnose"]
     assert len(targets) >= 2, "diagnose must not be a single point of failure"
 
-    for t in targets[1:]:
+    def reasoning_is_off(t):
         extra = t.get("extra", {}).get("extra_body", {})
-        reasoning_off = extra.get("reasoning", {}).get("enabled") is False
-        thinking_off = extra.get("thinking", {}).get("type") == "disabled"
-        assert reasoning_off or thinking_off, f"fallback {t['model']} still has reasoning on"
+        return (extra.get("reasoning", {}).get("enabled") is False
+                or extra.get("thinking", {}).get("type") == "disabled")
+
+    # The immediate escape from a burned-out primary must be reasoning-off. Anything after a
+    # reasoning-off target may be a mandatory-reasoning model (z-ai/glm-5.3 cannot disable it): it is
+    # only reached once a reasoning-off target has already failed, so it cannot trap the role.
+    assert reasoning_is_off(targets[1]), f"first fallback {targets[1]['model']} still has reasoning on"
+
+    first_off = next(i for i, t in enumerate(targets[1:], start=1) if reasoning_is_off(t))
+    for t in targets[1:first_off]:
+        assert reasoning_is_off(t), f"fallback {t['model']} sits ahead of the first reasoning-off target"
 
 
 def test_diagnose_budget_fits_a_real_answer_without_funding_a_long_burn():

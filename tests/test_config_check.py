@@ -12,6 +12,7 @@ from hound.config_extract import (
     evaluate, extract_settings, extract_specs, find_config_files, scale_label, script_constants,
 )
 
+# NOTE: every number, name and address in these fixtures is synthetic test data, not a real deployment.
 DEPLOY_JS = textwrap.dedent(
     """\
     const WAD = 10n ** 18n;

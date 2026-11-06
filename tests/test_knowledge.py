@@ -21,12 +21,16 @@ def _ids(lenses, prefix):
 
 def test_class_lenses_C1_to_C6(kb):
     ids = _ids(kb.lenses, "C")
-    assert ids == [f"C{i}" for i in range(1, 7)]
+    # at least C1..C6, in order; later classes (C7 cross-system trust boundary, ...) may be appended
+    assert len(ids) >= 6
+    assert ids[:6] == [f"C{i}" for i in range(1, 7)]
 
 
 def test_angle_lenses_A1_to_A7(kb):
     ids = _ids(kb.lenses, "A")
-    assert ids == [f"A{i}" for i in range(1, 8)]
+    # at least A1..A7, in order; later angles (A8 economic/incentive manipulation, ...) may be appended
+    assert len(ids) >= 7
+    assert ids[:7] == [f"A{i}" for i in range(1, 8)]
 
 
 def test_pattern_lenses_at_least_7(kb):
