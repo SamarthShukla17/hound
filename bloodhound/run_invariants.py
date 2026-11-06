@@ -9,6 +9,8 @@ import json
 from datetime import datetime
 from pathlib import Path
 
+from . import manifest
+from .costgov import BUDGET_EXCEEDED_EXIT_CODE, CostGovernor
 from .invariants import forge_invariant, load_claims
 
 HANDLER_SUBDIR = "test/.bloodhound/invariants"
@@ -74,9 +76,14 @@ async def invariants_command(args) -> int:
     kb = load_kb(args.kb)
     router = Router(models_path=args.models, local_only=args.local_only, seed=0, fresh=False)
     handler_dir = Path(args.target) / HANDLER_SUBDIR
+    governor = CostGovernor(router, args.max_cost)
 
     results = {}
     for claim in claims:
+        if not governor.check():
+            print(f"cost ceiling ${args.max_cost:.2f} reached (spent ${governor.spent():.2f}) — stopping, "
+                  f"{len(claims) - len(results)} claim(s) not attempted")
+            break
         result = await forge_invariant(router, kb, claim, ctx, args.target, handler_dir, max_repairs=args.max_repairs)
         results[claim.id] = result
         print(f"{claim.id}: {result.status}" + (f" ({result.notes})" if result.notes else ""))
@@ -84,7 +91,13 @@ async def invariants_command(args) -> int:
     out = Path(args.out) / datetime.now().strftime("invariants-%Y%m%d-%H%M%S")
     out.mkdir(parents=True, exist_ok=True)
     write_artifacts(out, results)
+    manifest.write(
+        out / "manifest.json", "invariants",
+        {"target": args.target, "invariants": args.invariants, "claim": args.claim,
+         "max_repairs": args.max_repairs, "max_cost_usd": args.max_cost},
+        router, governor,
+    )
 
     counterexamples = sum(1 for r in results.values() if r.status == "counterexample")
     print(f"{len(results)} claim(s) run, {counterexamples} counterexample(s), wrote {out}")
-    return 0
+    return BUDGET_EXCEEDED_EXIT_CODE if governor.breached else 0
