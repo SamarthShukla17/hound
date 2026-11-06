@@ -1,4 +1,4 @@
-# hound
+# Hound
 
 ## Cloud-only
 
