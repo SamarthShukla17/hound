@@ -219,3 +219,43 @@ def test_run_pocs_command_skips_novelty_when_panel_kills_the_finding(tmp_path, m
     args = _args(run_dir, no_llm=False, corpus=str(corpus_path), models="models.yaml")
     assert asyncio.run(run_pocs_command(args)) == 0
     assert novelty_calls == []
+
+
+def test_run_pocs_command_writes_a_dossier_only_for_forged_panel_surviving_findings(tmp_path, monkeypatch):
+    target = tmp_path / "target"
+    target.mkdir()
+    pocs_dir = tmp_path / "run" / "pocs"
+    pocs_dir.mkdir(parents=True)
+    forged_poc = pocs_dir / "a.t.sol"
+    forged_poc.write_text("function test_poc_a() public {}")
+    killed_poc = pocs_dir / "b.t.sol"
+    killed_poc.write_text("function test_poc_b() public {}")
+
+    run_dir = tmp_path / "run"
+    findings = [
+        {"id": "a", "hard_kill": False, "verdict": {"verdict": "keep"}, "poc_path": str(forged_poc), "title": "t-a"},
+        {"id": "b", "hard_kill": False, "verdict": {"verdict": "keep"}, "poc_path": str(killed_poc), "title": "t-b"},
+    ]
+    (run_dir / "findings.json").write_text(json.dumps(
+        {"judge_mode": "advisory", "provenance": {"target": str(target), "commit": "deadbee"}, "findings": findings}
+    ))
+
+    async def fake_forge_candidate(router, kb, finding, poc_code, target_root, forge_dir, **kw):
+        return ForgeResult(status="forged", poc_code=poc_code, attack_output="trace")
+
+    async def fake_run_panel(router, kb, finding, forge_result, target_root, forge_dir, **kw):
+        return PanelResult(killed=(finding["id"] == "b"))
+
+    monkeypatch.setattr(run_pocs_mod, "forge_candidate", fake_forge_candidate)
+    monkeypatch.setattr(run_pocs_mod, "run_panel", fake_run_panel)
+
+    args = _args(run_dir, no_llm=False, models="models.yaml")
+    assert asyncio.run(run_pocs_command(args)) == 0
+
+    assert (run_dir / "dossiers" / "a.md").is_file()
+    assert "on deadbee" in (run_dir / "dossiers" / "a.md").read_text()
+    assert not (run_dir / "dossiers" / "b.md").exists()
+
+    out = {f["id"]: f for f in json.loads((run_dir / "findings.json").read_text())["findings"]}
+    assert out["a"]["dossier_path"] == str(run_dir / "dossiers" / "a.md")
+    assert "dossier_path" not in out["b"]

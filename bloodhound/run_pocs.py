@@ -1,17 +1,19 @@
 """run-pocs: feed each live candidate's PoC scaffold through the Forger, the Refutation Panel,
-and (for anything the panel doesn't kill) the Novelty classifier.
+the Novelty classifier (when the panel doesn't kill it), and the Dossier renderer.
 
 Mirrors hound.chain's command shape (read findings.json, resolve the target, run, write back)
 but never re-decides severity or kills a finding — it only attaches `entry["forge"]`,
-`entry["refute"]`, and `entry["novelty"]` for a human (or `hound score`) to read alongside the
-judge's own verdict. Only Foundry (Solidity) PoCs are forged; a LiteSVM (Rust) poc_path is left
-untouched — the differential gate as written compiles/runs against `forge`, not `cargo`.
+`entry["refute"]`, `entry["novelty"]`, and `entry["dossier_path"]` for a human (or `hound score`)
+to read alongside the judge's own verdict. Only Foundry (Solidity) PoCs are forged; a LiteSVM
+(Rust) poc_path is left untouched — the differential gate as written compiles/runs against
+`forge`, not `cargo`.
 """
 
 from pathlib import Path
 
 from hound.runs import is_hard_kill, read_findings, write_findings
 
+from .dossier import render as render_dossier
 from .forger import forge_candidate
 from .novelty import classify, load_records
 from .refute import run_panel
@@ -83,6 +85,23 @@ async def run_pocs_command(args) -> int:
         novelty_results[c["id"]] = novelty
         print(f"{c['id']}: novelty={novelty.verdict}" + (f" ({novelty.notes})" if novelty.notes else ""))
 
+    commit = (meta.get("provenance") or {}).get("commit") or ""
+    dossier_dir = Path(args.run_dir) / "dossiers"
+    by_id = {f["id"]: f for f in findings}
+    dossier_paths = {}
+    for fid, r in forge_results.items():
+        if r.status != "forged":
+            continue
+        panel = panel_results.get(fid)
+        if panel is not None and panel.killed:
+            continue
+        dossier_dir.mkdir(parents=True, exist_ok=True)
+        text = render_dossier(by_id[fid], r, panel, novelty_results.get(fid), commit=commit)
+        path = dossier_dir / f"{fid}.md"
+        path.write_text(text)
+        dossier_paths[fid] = path
+        print(f"{fid}: dossier -> {path}")
+
     findings_out = []
     for f in findings:
         entry = dict(f)
@@ -100,6 +119,8 @@ async def run_pocs_command(args) -> int:
         if f["id"] in novelty_results:
             n = novelty_results[f["id"]]
             entry["novelty"] = {"verdict": n.verdict, "nearest": n.nearest, "notes": n.notes}
+        if f["id"] in dossier_paths:
+            entry["dossier_path"] = str(dossier_paths[f["id"]])
         findings_out.append(entry)
 
     extra_meta = {k: v for k, v in meta.items() if k not in ("judge_mode", "provenance")}
