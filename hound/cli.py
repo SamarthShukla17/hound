@@ -315,6 +315,12 @@ def build_parser() -> argparse.ArgumentParser:
     inv.add_argument("--max-cost", dest="max_cost", type=float, default=None,
                      help="stop starting new claims once this run's cost exceeds this many dollars; "
                           "omit for no ceiling. Exit code 3 on breach.")
+    inv.add_argument("--deep-fuzz", dest="deep_fuzz", choices=["off", "echidna", "medusa", "both"], default="off",
+                     help="escalate a claim the fast gate could not falsify (status 'held') to a real, "
+                          "time-boxed Echidna/Medusa campaign (default: off — only run where necessary, "
+                          "never on a claim already falsified or never compiled)")
+    inv.add_argument("--deep-fuzz-timeout", dest="deep_fuzz_timeout", type=int, default=300,
+                     help="seconds each deep-fuzz tool run gets (default: 300)")
     inv.set_defaults(handler=_cmd_invariants)
 
     budget = sub.add_parser("budget", help="show x402 monthly spend")
