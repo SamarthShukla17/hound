@@ -1,5 +1,7 @@
 """Step N: Dossier renderer — honest confidence line, verbatim evidence, no fabricated sections."""
 
+import pytest
+
 from bloodhound.dossier import render
 from bloodhound.forger import ForgeResult
 from bloodhound.novelty import NoveltyResult
@@ -20,6 +22,12 @@ FORGED = ForgeResult(
     control_code="function test_poc_HB001() public { assertEq(1, 1); }",
     attack_output="trace: assertion failed at line 1",
 )
+
+
+def test_render_rejects_a_non_forged_result():
+    unforged = ForgeResult(status="unforged", poc_code="", attack_output="")
+    with pytest.raises(ValueError, match="forged"):
+        render(FINDING, unforged)
 
 
 def test_render_includes_honest_confidence_and_commit():

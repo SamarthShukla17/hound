@@ -100,6 +100,16 @@ def _router_with_vectors(vectors):
     return FakeRouter({"embed": [({"model": "m"}, provider)]})
 
 
+def test_classify_vector_count_mismatch_is_unclassified_not_misaligned():
+    # provider returns one fewer vector than texts sent (e.g. it silently dropped one) - must
+    # not zip the surviving vectors against the wrong corpus records.
+    router = _router_with_vectors([[1.0, 0.0]])
+    corpus = [{"id": "C1", "title": "a"}, {"id": "C2", "title": "b"}]
+    result = asyncio.run(classify(router, "embed", {"title": "x"}, corpus))
+    assert result.verdict == "unclassified"
+    assert "mismatch" in result.notes
+
+
 def test_classify_known_pattern_when_nearly_identical():
     # finding vector == corpus vector -> cosine similarity 1.0 >= HIGH_SIMILARITY
     router = _router_with_vectors([[1.0, 0.0], [1.0, 0.0]])

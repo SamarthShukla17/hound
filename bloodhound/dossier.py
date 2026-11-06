@@ -47,8 +47,11 @@ def _novelty_section(novelty_result) -> list:
 
 
 def render(finding: dict, forge_result, panel_result=None, novelty_result=None, *, commit: str = "") -> str:
-    """ForgeResult with status != "forged" produces no honest Confidence claim to make - callers
-    should not render a dossier for anything the Forger/Panel didn't actually confirm."""
+    """ForgeResult with status != "forged" produces no honest Confidence claim to make - enforced
+    here, not left to caller discipline, so a future call site can't accidentally print a
+    "Foundry-verified" claim for a finding the Forger/Panel never actually confirmed."""
+    if forge_result.status != "forged":
+        raise ValueError(f"render() requires a forged ForgeResult, got status={forge_result.status!r}")
     lines = [
         f"TITLE:        {finding.get('title', '')}",
         f"SEVERITY:     {finding.get('severity', '')}",

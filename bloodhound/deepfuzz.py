@@ -190,10 +190,11 @@ def run_echidna(contract_path, contract_name: str, config_path, prop_name: str, 
                                notes="echidna found a call sequence that breaks the claimed property")
     if f"{prop_name}: passing" in out and proc.returncode == 0:
         return DeepFuzzResult(status="held", tool="echidna", raw_output=out)
-    if proc.returncode == 0:
-        return DeepFuzzResult(status="held", tool="echidna", raw_output=out)
+    # A bare exit 0 with neither "passing" nor "failed" for prop_name is NOT a held result -
+    # never conflate "we didn't recognize the output" with "the campaign ran clean" (see the
+    # module docstring's warning about "unavailable").
     return DeepFuzzResult(status="error", tool="echidna", raw_output=out,
-                           notes=f"echidna exited {proc.returncode} without a parseable pass/fail line")
+                           notes=f"echidna exited {proc.returncode} without a parseable pass/fail line for {prop_name!r}")
 
 
 def run_medusa(config_path, prop_name: str, target_root,
@@ -239,12 +240,16 @@ async def escalate(
         max_repairs=max_repairs, runner=runner,
     )
     if not compiled:
-        failure = DeepFuzzResult(
-            status="compile_failed", tool=tool, contract_code=code,
-            notes=f"deep-fuzz target never compiled after {iters} repair round(s): {err}",
-        )
         tools = ("echidna", "medusa") if tool == "both" else (tool,)
-        return {t: failure for t in tools}
+        # A separate DeepFuzzResult instance per tool - callers must be free to annotate one
+        # tool's result without silently mutating the other's (they'd otherwise be the same object).
+        return {
+            t: DeepFuzzResult(
+                status="compile_failed", tool=t, contract_code=code,
+                notes=f"deep-fuzz target never compiled after {iters} repair round(s): {err}",
+            )
+            for t in tools
+        }
 
     results = {}
     if tool in ("echidna", "both"):
