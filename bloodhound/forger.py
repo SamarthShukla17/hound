@@ -135,7 +135,7 @@ def _control_prompt(code: str, finding: dict) -> str:
     )
 
 
-async def _compile_with_repairs(
+async def compile_with_repairs(
     router, kb, code: str, target_root, write_path, *, scope=None, max_repairs=DEFAULT_MAX_REPAIRS, runner=subprocess.run
 ):
     """Deterministic repair, then up to `max_repairs` LLM-repair/recompile rounds.
@@ -185,7 +185,7 @@ async def forge_candidate(
     fid = re.sub(r"[^\w.-]", "_", str(finding.get("id") or finding.get("title") or "candidate"))
 
     attack_path = forge_dir / f"{fid}_attack.t.sol"
-    code, compiled, err, iters = await _compile_with_repairs(
+    code, compiled, err, iters = await compile_with_repairs(
         router, kb, poc_code, target_root, attack_path, scope=scope, max_repairs=max_repairs, runner=runner
     )
     if not compiled:
@@ -215,7 +215,7 @@ async def forge_candidate(
         )
 
     control_path = forge_dir / f"{fid}_control.t.sol"
-    control_code, control_compiled, control_err, control_iters = await _compile_with_repairs(
+    control_code, control_compiled, control_err, control_iters = await compile_with_repairs(
         router, kb, control_seed, target_root, control_path, scope=scope, max_repairs=max_repairs, runner=runner
     )
     total_iters = iters + control_iters

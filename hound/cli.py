@@ -84,6 +84,12 @@ def _cmd_run_pocs(args: argparse.Namespace) -> int:
     return asyncio.run(run_pocs_command(args))
 
 
+def _cmd_invariants(args: argparse.Namespace) -> int:
+    from bloodhound.run_invariants import invariants_command
+
+    return asyncio.run(invariants_command(args))
+
+
 def _cmd_coverage(args: argparse.Namespace) -> int:
     from .coverage_gap import coverage_command
 
@@ -288,6 +294,17 @@ def build_parser() -> argparse.ArgumentParser:
     run_pocs.add_argument("--no-panel", dest="no_panel", action="store_true",
                           help="forge only; skip the refutation panel on anything that forges")
     run_pocs.set_defaults(handler=_cmd_run_pocs)
+
+    inv = sub.add_parser(
+        "invariants", help="forge a Foundry handler per human-curated claim and run the fast fuzz gate"
+    )
+    inv.add_argument("target")
+    inv.add_argument("--invariants", required=True, help="path to a human-curated invariants.yaml")
+    inv.add_argument("--claim", default=None, help="run only this claim id")
+    inv.add_argument("--kb", default="kb")
+    inv.add_argument("--max-repairs", dest="max_repairs", type=int, default=4)
+    inv.add_argument("--out", default="runs")
+    inv.set_defaults(handler=_cmd_invariants)
 
     budget = sub.add_parser("budget", help="show x402 monthly spend")
     budget.set_defaults(handler=_not_implemented("budget"))
