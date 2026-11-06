@@ -58,3 +58,8 @@ New optional `models.yaml` roles this layer can use, each degrading gracefully i
 `refute1`, `refute2`, `refute3` (Refutation Panel), `embed` (Novelty classifier, an
 OpenAI-compatible `/embeddings` endpoint — OpenRouter or OpenAI both work through the existing
 `openai` SDK client).
+
+Cost governance: `run-pocs`/`invariants --max-cost N` stop (exit code `3`) once
+`Router.report()`'s running total crosses `N`; every hound and bloodhound command now writes
+its cost report to `<run_dir>/manifest.json`, not just to stdout. See [COSTS.md](COSTS.md) for
+which model each role actually bills to, at what price, and what's been measured so far.
