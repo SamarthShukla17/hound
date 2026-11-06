@@ -293,6 +293,11 @@ def build_parser() -> argparse.ArgumentParser:
                           help="skip candidates (no repair/control calls possible without a router)")
     run_pocs.add_argument("--no-panel", dest="no_panel", action="store_true",
                           help="forge only; skip the refutation panel on anything that forges")
+    run_pocs.add_argument("--corpus", default=None,
+                          help="JSON file of known findings (target's own prior audits and/or your own corpus) "
+                               "to classify panel-surviving findings against; omit to skip novelty classification")
+    run_pocs.add_argument("--embed-role", dest="embed_role", default="embed",
+                          help="models.yaml role to resolve for embeddings (default: embed)")
     run_pocs.set_defaults(handler=_cmd_run_pocs)
 
     inv = sub.add_parser(

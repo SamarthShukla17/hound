@@ -1,10 +1,11 @@
-"""run-pocs: feed each live candidate's PoC scaffold through the Forger and the Refutation Panel.
+"""run-pocs: feed each live candidate's PoC scaffold through the Forger, the Refutation Panel,
+and (for anything the panel doesn't kill) the Novelty classifier.
 
 Mirrors hound.chain's command shape (read findings.json, resolve the target, run, write back)
-but never re-decides severity or kills a finding — it only attaches `entry["forge"]` and, for
-anything forged, `entry["refute"]`, for a human (or `hound score`) to read alongside the judge's
-own verdict. Only Foundry (Solidity) PoCs are forged; a LiteSVM (Rust) poc_path is left untouched
-— the differential gate as written compiles/runs against `forge`, not `cargo`.
+but never re-decides severity or kills a finding — it only attaches `entry["forge"]`,
+`entry["refute"]`, and `entry["novelty"]` for a human (or `hound score`) to read alongside the
+judge's own verdict. Only Foundry (Solidity) PoCs are forged; a LiteSVM (Rust) poc_path is left
+untouched — the differential gate as written compiles/runs against `forge`, not `cargo`.
 """
 
 from pathlib import Path
@@ -12,6 +13,7 @@ from pathlib import Path
 from hound.runs import is_hard_kill, read_findings, write_findings
 
 from .forger import forge_candidate
+from .novelty import classify, load_records
 from .refute import run_panel
 
 FORGE_SUBDIR = "test/.bloodhound"
@@ -52,9 +54,11 @@ async def run_pocs_command(args) -> int:
     kb = load_kb(args.kb)
     candidates = forgeable(meta, findings)
     forge_dir = Path(target) / FORGE_SUBDIR
+    corpus = load_records(args.corpus) if args.corpus else []
 
     forge_results = {}
     panel_results = {}
+    novelty_results = {}
     for c in candidates:
         if router is None:
             print(f"{c['id']}: skipped (--no-llm; the compile/repair loop needs a router)")
@@ -73,6 +77,12 @@ async def run_pocs_command(args) -> int:
         verb = "KILLED by refutation" if panel.killed else "survived the panel"
         print(f"{c['id']}: {verb}" + (f" — {panel.surviving_refutation}" if panel.surviving_refutation else ""))
 
+        if panel.killed or not corpus:
+            continue
+        novelty = await classify(router, args.embed_role, c, corpus)
+        novelty_results[c["id"]] = novelty
+        print(f"{c['id']}: novelty={novelty.verdict}" + (f" ({novelty.notes})" if novelty.notes else ""))
+
     findings_out = []
     for f in findings:
         entry = dict(f)
@@ -87,6 +97,9 @@ async def run_pocs_command(args) -> int:
                 "role_verdicts": p.role_verdicts,
                 "notes": p.notes,
             }
+        if f["id"] in novelty_results:
+            n = novelty_results[f["id"]]
+            entry["novelty"] = {"verdict": n.verdict, "nearest": n.nearest, "notes": n.notes}
         findings_out.append(entry)
 
     extra_meta = {k: v for k, v in meta.items() if k not in ("judge_mode", "provenance")}
