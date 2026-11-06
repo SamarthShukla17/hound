@@ -1,7 +1,7 @@
 """Command-line interface.
 
 Remaining subcommands are stubbed here and get real bodies in later steps:
-budget (10), coach (11), run-pocs (12).
+budget (10), coach (11). run-pocs (12) is implemented (bloodhound/run_pocs.py, step J).
 """
 
 import argparse
@@ -76,6 +76,18 @@ def _cmd_chain(args: argparse.Namespace) -> int:
     from .chain import chain_command
 
     return asyncio.run(chain_command(args))
+
+
+def _cmd_run_pocs(args: argparse.Namespace) -> int:
+    from bloodhound.run_pocs import run_pocs_command
+
+    return asyncio.run(run_pocs_command(args))
+
+
+def _cmd_invariants(args: argparse.Namespace) -> int:
+    from bloodhound.run_invariants import invariants_command
+
+    return asyncio.run(invariants_command(args))
 
 
 def _cmd_coverage(args: argparse.Namespace) -> int:
@@ -272,8 +284,32 @@ def build_parser() -> argparse.ArgumentParser:
     coach = sub.add_parser("coach", help="ask guided questions about a target, no verdicts")
     coach.set_defaults(handler=_not_implemented("coach"))
 
-    run_pocs = sub.add_parser("run-pocs", help="execute PoC scaffolds from a run")
-    run_pocs.set_defaults(handler=_not_implemented("run-pocs"))
+    run_pocs = sub.add_parser("run-pocs", help="forge PoC scaffolds from a run: compile, repair, differential gate")
+    run_pocs.add_argument("run_dir")
+    run_pocs.add_argument("--target", default=None, help="the scanned codebase (default: the run's recorded target)")
+    run_pocs.add_argument("--kb", default="kb")
+    run_pocs.add_argument("--max-repairs", dest="max_repairs", type=int, default=4)
+    run_pocs.add_argument("--no-llm", dest="no_llm", action="store_true",
+                          help="skip candidates (no repair/control calls possible without a router)")
+    run_pocs.add_argument("--no-panel", dest="no_panel", action="store_true",
+                          help="forge only; skip the refutation panel on anything that forges")
+    run_pocs.add_argument("--corpus", default=None,
+                          help="JSON file of known findings (target's own prior audits and/or your own corpus) "
+                               "to classify panel-surviving findings against; omit to skip novelty classification")
+    run_pocs.add_argument("--embed-role", dest="embed_role", default="embed",
+                          help="models.yaml role to resolve for embeddings (default: embed)")
+    run_pocs.set_defaults(handler=_cmd_run_pocs)
+
+    inv = sub.add_parser(
+        "invariants", help="forge a Foundry handler per human-curated claim and run the fast fuzz gate"
+    )
+    inv.add_argument("target")
+    inv.add_argument("--invariants", required=True, help="path to a human-curated invariants.yaml")
+    inv.add_argument("--claim", default=None, help="run only this claim id")
+    inv.add_argument("--kb", default="kb")
+    inv.add_argument("--max-repairs", dest="max_repairs", type=int, default=4)
+    inv.add_argument("--out", default="runs")
+    inv.set_defaults(handler=_cmd_invariants)
 
     budget = sub.add_parser("budget", help="show x402 monthly spend")
     budget.set_defaults(handler=_not_implemented("budget"))

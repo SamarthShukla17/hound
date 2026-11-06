@@ -38,3 +38,23 @@ Each is also a standalone command and a `scan` flag; all degrade gracefully (a f
 | Coverage gaps | `hound coverage TARGET [--lcov FILE]`, `scan --coverage auto\|off\|FILE` | Ranks functions whose branches the team's tests never exercise (trivial guards down-weighted); `forge coverage` or any lcov file. |
 | Profit vs disruption | every finding | `value_flow` + `attacker_gain` (equity accounting) required; judge recomputes; report shows tiers and warns when severity outruns the tier (`kb/FINDING_TIERS.md`, `kb/REPORT_TEMPLATE.md`). |
 | Chain check | `hound chain RUN_DIR`, `scan --chain auto\|off` | Pairs standing findings that share state one side writes, and has a model test whether they combine into a profit (`kb/CHAINING.md`). |
+
+## Bloodhound: execution-gated verification (`bloodhound/`)
+
+A sibling package, not a fork of `hound/`: judge/judge2 are still LLM opinions, and an LLM can be
+argued into or out of one. Bloodhound never adds another opinion on top of a candidate — it tries
+to kill it with a compiled, executed Foundry test, and only lets a finding read as confirmed if it
+survives that.
+
+| Stage | Command / flag | What it does |
+|---|---|---|
+| PoC Forger | `hound run-pocs RUN_DIR [--target T] [--max-repairs N]` | Compiles each live candidate's existing PoC scaffold against the real target, LLM-repairs compile errors (bounded rounds), then only marks it `forged` if the attack run demonstrates the bug **and** an LLM-written control variant (same test, attack step removed) does not — the differential gate that kills a tautological assertion. |
+| Refutation Panel | same command, `--no-panel` to skip | Up to 3 configurable roles (`refute1`/`refute2`/`refute3` in `models.yaml`; unconfigured ones are just skipped) each answer a binary checklist against a forged PoC, asked twice with the claim/code order swapped (disagreement discarded as unreliable). A "refuted" verdict must give a `require()`/`vm.assume()` statement that gets injected into the real test and re-run — it only counts if the attack actually stops passing. |
+| Invariant Engine | `hound invariants TARGET --invariants FILE.yaml [--claim ID]` | Loads a **human-curated** claims file (never mapper-derived — see `hound/agents.py`'s `_invariant_checklist` docstring for why that measured worse), generates a Foundry invariant-test handler per claim, repairs/compiles it, and runs Foundry's fast fuzz gate. A counterexample is a lead, not a confirmed finding — it still goes through the Forger/Panel. |
+| Novelty classifier | same command, `--corpus FILE.json [--embed-role ROLE]` | Embeds a panel-surviving finding and ranks it against a human-maintained corpus (a target's own prior audits and/or your own accumulated findings, same `{"findings": [...]}` shape `external.py` uses) via a new `embed` role — no new dependency, no MCP/Solodit client (that stays a flagged gap, not a fake). |
+| Dossier | same command (automatic for anything forged + panel-surviving) | Renders `kb/REPORT_TEMPLATE.md`'s own section shape at `runs/<run>/dossiers/<id>.md`, with an honest `CONFIDENCE: Foundry-verified: 1 test passing on <commit>` line and the PoC/trace quoted verbatim — sections with no underlying data (Threat Model, Production Parameters, Recommendation, Duplicate Differentiation) are left as explicit TODOs, never fabricated. |
+
+New optional `models.yaml` roles this layer can use, each degrading gracefully if absent:
+`refute1`, `refute2`, `refute3` (Refutation Panel), `embed` (Novelty classifier, an
+OpenAI-compatible `/embeddings` endpoint — OpenRouter or OpenAI both work through the existing
+`openai` SDK client).
