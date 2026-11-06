@@ -285,6 +285,8 @@ def build_parser() -> argparse.ArgumentParser:
     run_pocs.add_argument("--max-repairs", dest="max_repairs", type=int, default=4)
     run_pocs.add_argument("--no-llm", dest="no_llm", action="store_true",
                           help="skip candidates (no repair/control calls possible without a router)")
+    run_pocs.add_argument("--no-panel", dest="no_panel", action="store_true",
+                          help="forge only; skip the refutation panel on anything that forges")
     run_pocs.set_defaults(handler=_cmd_run_pocs)
 
     budget = sub.add_parser("budget", help="show x402 monthly spend")

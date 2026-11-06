@@ -1,10 +1,10 @@
-"""run-pocs: feed each live candidate's PoC scaffold through the Forger and record the verdict.
+"""run-pocs: feed each live candidate's PoC scaffold through the Forger and the Refutation Panel.
 
 Mirrors hound.chain's command shape (read findings.json, resolve the target, run, write back)
-but never re-decides severity or kills a finding — it only attaches `entry["forge"]`, the
-execution-gated verdict, for a human (or `hound score`) to read alongside the judge's own verdict.
-Only Foundry (Solidity) PoCs are forged; a LiteSVM (Rust) poc_path is left untouched — the
-differential gate as written compiles/runs against `forge`, not `cargo`.
+but never re-decides severity or kills a finding — it only attaches `entry["forge"]` and, for
+anything forged, `entry["refute"]`, for a human (or `hound score`) to read alongside the judge's
+own verdict. Only Foundry (Solidity) PoCs are forged; a LiteSVM (Rust) poc_path is left untouched
+— the differential gate as written compiles/runs against `forge`, not `cargo`.
 """
 
 from pathlib import Path
@@ -12,6 +12,7 @@ from pathlib import Path
 from hound.runs import is_hard_kill, read_findings, write_findings
 
 from .forger import forge_candidate
+from .refute import run_panel
 
 FORGE_SUBDIR = "test/.bloodhound"
 
@@ -52,7 +53,8 @@ async def run_pocs_command(args) -> int:
     candidates = forgeable(meta, findings)
     forge_dir = Path(target) / FORGE_SUBDIR
 
-    results = {}
+    forge_results = {}
+    panel_results = {}
     for c in candidates:
         if router is None:
             print(f"{c['id']}: skipped (--no-llm; the compile/repair loop needs a router)")
@@ -61,24 +63,39 @@ async def run_pocs_command(args) -> int:
             router, kb, c, Path(c["poc_path"]).read_text(), target, forge_dir,
             max_repairs=args.max_repairs,
         )
-        results[c["id"]] = result
+        forge_results[c["id"]] = result
         print(f"{c['id']}: {result.status}" + (f" ({result.notes})" if result.notes else ""))
+
+        if result.status != "forged" or args.no_panel:
+            continue
+        panel = await run_panel(router, kb, c, result, target, forge_dir)
+        panel_results[c["id"]] = panel
+        verb = "KILLED by refutation" if panel.killed else "survived the panel"
+        print(f"{c['id']}: {verb}" + (f" — {panel.surviving_refutation}" if panel.surviving_refutation else ""))
 
     findings_out = []
     for f in findings:
         entry = dict(f)
-        if f["id"] in results:
-            r = results[f["id"]]
-            entry["forge"] = {
-                "status": r.status,
-                "iterations": r.iterations,
-                "notes": r.notes,
+        if f["id"] in forge_results:
+            r = forge_results[f["id"]]
+            entry["forge"] = {"status": r.status, "iterations": r.iterations, "notes": r.notes}
+        if f["id"] in panel_results:
+            p = panel_results[f["id"]]
+            entry["refute"] = {
+                "killed": p.killed,
+                "surviving_refutation": p.surviving_refutation,
+                "role_verdicts": p.role_verdicts,
+                "notes": p.notes,
             }
         findings_out.append(entry)
 
     extra_meta = {k: v for k, v in meta.items() if k not in ("judge_mode", "provenance")}
     write_findings(args.run_dir, meta.get("judge_mode", "gate"), meta.get("provenance"), findings_out, **extra_meta)
 
-    forged = sum(1 for r in results.values() if r.status == "forged")
-    print(f"{len(candidates)} candidate(s) with a Foundry PoC, {len(results)} forged-attempted, {forged} confirmed forged")
+    forged = sum(1 for r in forge_results.values() if r.status == "forged")
+    killed_by_panel = sum(1 for p in panel_results.values() if p.killed)
+    print(
+        f"{len(candidates)} candidate(s) with a Foundry PoC, {len(forge_results)} forged-attempted, "
+        f"{forged} confirmed forged, {killed_by_panel} killed by the refutation panel"
+    )
     return 0
