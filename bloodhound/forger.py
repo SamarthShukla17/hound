@@ -12,9 +12,11 @@ this module adds the execution loop around them, it does not re-implement genera
 """
 
 import json
+import os
 import re
 import shutil
 import subprocess
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -57,17 +59,36 @@ def strip_fences(code: str) -> str:
     return _FENCE_RE.sub("", code).strip() + "\n"
 
 
+def _active_solc_pin(target_root) -> str | None:
+    """The solc version `forge build` actually uses: the [profile.$FOUNDRY_PROFILE] table's own
+    `solc`, falling back to [profile.default]'s (forge's own inheritance rule) when the active
+    profile doesn't set one. A plain regex search over the raw file would grab the FIRST `solc =`
+    line regardless of which profile it's under - wrong whenever a non-default profile (e.g.
+    [profile.ci]) pins a different compiler than the one actually in use."""
+    toml_path = Path(target_root) / "foundry.toml"
+    if not toml_path.is_file():
+        return None
+    try:
+        doc = tomllib.loads(toml_path.read_text())
+    except tomllib.TOMLDecodeError:
+        return None
+    profiles = doc.get("profile", {})
+    active = os.environ.get("FOUNDRY_PROFILE", "default")
+    for name in (active, "default"):
+        solc = profiles.get(name, {}).get("solc")
+        if solc:
+            return str(solc)
+    return None
+
+
 def normalise_pragma(code: str, target_root) -> str:
     """Rewrite `pragma solidity ...;` to the target's own foundry.toml solc pin, when there is
     one. A guessed pragma is the single most common reason an otherwise-correct PoC fails to
     compile against a real repo."""
-    toml_path = Path(target_root) / "foundry.toml"
-    if not toml_path.is_file():
+    solc = _active_solc_pin(target_root)
+    if not solc or not _PRAGMA_RE.search(code):
         return code
-    m = re.search(r'solc\s*=\s*["\']([\d.]+)["\']', toml_path.read_text())
-    if not m or not _PRAGMA_RE.search(code):
-        return code
-    return _PRAGMA_RE.sub(f"pragma solidity ^{m.group(1)};", code, count=1)
+    return _PRAGMA_RE.sub(f"pragma solidity ^{solc};", code, count=1)
 
 
 def deterministic_repair(code: str, target_root) -> str:

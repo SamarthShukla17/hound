@@ -298,6 +298,9 @@ def build_parser() -> argparse.ArgumentParser:
                                "to classify panel-surviving findings against; omit to skip novelty classification")
     run_pocs.add_argument("--embed-role", dest="embed_role", default="embed",
                           help="models.yaml role to resolve for embeddings (default: embed)")
+    run_pocs.add_argument("--max-cost", dest="max_cost", type=float, default=None,
+                          help="stop starting new candidates once this run's cost (from the router's own usage "
+                               "report) exceeds this many dollars; omit for no ceiling. Exit code 3 on breach.")
     run_pocs.set_defaults(handler=_cmd_run_pocs)
 
     inv = sub.add_parser(
@@ -309,6 +312,15 @@ def build_parser() -> argparse.ArgumentParser:
     inv.add_argument("--kb", default="kb")
     inv.add_argument("--max-repairs", dest="max_repairs", type=int, default=4)
     inv.add_argument("--out", default="runs")
+    inv.add_argument("--max-cost", dest="max_cost", type=float, default=None,
+                     help="stop starting new claims once this run's cost exceeds this many dollars; "
+                          "omit for no ceiling. Exit code 3 on breach.")
+    inv.add_argument("--deep-fuzz", dest="deep_fuzz", choices=["off", "echidna", "medusa", "both"], default="off",
+                     help="escalate a claim the fast gate could not falsify (status 'held') to a real, "
+                          "time-boxed Echidna/Medusa campaign (default: off — only run where necessary, "
+                          "never on a claim already falsified or never compiled)")
+    inv.add_argument("--deep-fuzz-timeout", dest="deep_fuzz_timeout", type=int, default=300,
+                     help="seconds each deep-fuzz tool run gets (default: 300)")
     inv.set_defaults(handler=_cmd_invariants)
 
     budget = sub.add_parser("budget", help="show x402 monthly spend")

@@ -62,8 +62,23 @@ def test_normalise_pragma_no_foundry_toml_is_noop(tmp_path):
     assert normalise_pragma(code, tmp_path) == code
 
 
+def test_normalise_pragma_uses_active_profile_not_first_match(tmp_path, monkeypatch):
+    # [profile.default] has no solc pin; [profile.ci] does. forge build with no
+    # FOUNDRY_PROFILE set runs under "default" and would NOT use the ci pin — a naive
+    # first-match-in-file regex would wrongly grab 0.8.21 from [profile.ci] here.
+    (tmp_path / "foundry.toml").write_text(
+        '[profile.default]\nvia_ir = true\n\n[profile.ci]\nsolc = "0.8.21"\n'
+    )
+    monkeypatch.delenv("FOUNDRY_PROFILE", raising=False)
+    code = "pragma solidity ^0.8.0;\n"
+    assert normalise_pragma(code, tmp_path) == code
+
+    monkeypatch.setenv("FOUNDRY_PROFILE", "ci")
+    assert "pragma solidity ^0.8.21;" in normalise_pragma(code, tmp_path)
+
+
 def test_deterministic_repair_combines_both(tmp_path):
-    (tmp_path / "foundry.toml").write_text('solc = "0.8.21"\n')
+    (tmp_path / "foundry.toml").write_text('[profile.default]\nsolc = "0.8.21"\n')
     code = "```solidity\npragma solidity ^0.8.0;\ncontract X {}\n```"
     out = deterministic_repair(code, tmp_path)
     assert "```" not in out

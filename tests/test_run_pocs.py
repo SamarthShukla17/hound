@@ -13,7 +13,7 @@ from bloodhound.run_pocs import forgeable, run_pocs_command
 def _args(run_dir, **overrides):
     base = dict(
         run_dir=str(run_dir), target=None, kb="kb", max_repairs=4, no_llm=True, no_panel=False,
-        corpus=None, embed_role="embed", models=None, local_only=False,
+        corpus=None, embed_role="embed", max_cost=None, models=None, local_only=False,
     )
     base.update(overrides)
     return type("A", (), base)()
@@ -259,3 +259,50 @@ def test_run_pocs_command_writes_a_dossier_only_for_forged_panel_surviving_findi
     out = {f["id"]: f for f in json.loads((run_dir / "findings.json").read_text())["findings"]}
     assert out["a"]["dossier_path"] == str(run_dir / "dossiers" / "a.md")
     assert "dossier_path" not in out["b"]
+
+
+def test_run_pocs_command_stops_on_cost_ceiling_and_exits_3(tmp_path, monkeypatch):
+    target = tmp_path / "target"
+    target.mkdir()
+    pocs_dir = tmp_path / "run" / "pocs"
+    pocs_dir.mkdir(parents=True)
+    poc_a = pocs_dir / "a.t.sol"
+    poc_a.write_text("function test_poc_a() public {}")
+    poc_b = pocs_dir / "b.t.sol"
+    poc_b.write_text("function test_poc_b() public {}")
+
+    run_dir = tmp_path / "run"
+    findings = [
+        {"id": "a", "hard_kill": False, "verdict": {"verdict": "keep"}, "poc_path": str(poc_a)},
+        {"id": "b", "hard_kill": False, "verdict": {"verdict": "keep"}, "poc_path": str(poc_b)},
+    ]
+    (run_dir / "findings.json").write_text(json.dumps(
+        {"judge_mode": "advisory", "provenance": {"target": str(target)}, "findings": findings}
+    ))
+
+    forge_calls = []
+
+    async def fake_forge_candidate(router, kb, finding, poc_code, target_root, forge_dir, **kw):
+        forge_calls.append(finding["id"])
+        return ForgeResult(status="unforged", notes="x")
+
+    monkeypatch.setattr(run_pocs_mod, "forge_candidate", fake_forge_candidate)
+
+    class SpentRouter:
+        """Reports spend already over the ceiling before any candidate runs."""
+
+        def report(self):
+            return {"total_usd": 999.0}
+
+    import hound.llm as llm_mod
+
+    monkeypatch.setattr(llm_mod, "Router", lambda **kw: SpentRouter())
+
+    args = _args(run_dir, no_llm=False, max_cost=1.0, models="models.yaml")
+    assert asyncio.run(run_pocs_command(args)) == 3
+
+    assert forge_calls == []  # ceiling was already breached before the first candidate
+    manifest = json.loads((run_dir / "manifest.json").read_text())
+    assert manifest["breached"] is True
+    assert manifest["max_cost_usd"] == 1.0
+    assert manifest["cost_report"]["total_usd"] == 999.0

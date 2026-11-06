@@ -13,6 +13,8 @@ from pathlib import Path
 
 from hound.runs import is_hard_kill, read_findings, write_findings
 
+from . import manifest
+from .costgov import BUDGET_EXCEEDED_EXIT_CODE, CostGovernor
 from .dossier import render as render_dossier
 from .forger import forge_candidate
 from .novelty import classify, load_records
@@ -57,6 +59,7 @@ async def run_pocs_command(args) -> int:
     candidates = forgeable(meta, findings)
     forge_dir = Path(target) / FORGE_SUBDIR
     corpus = load_records(args.corpus) if args.corpus else []
+    governor = CostGovernor(router, args.max_cost)
 
     forge_results = {}
     panel_results = {}
@@ -65,6 +68,10 @@ async def run_pocs_command(args) -> int:
         if router is None:
             print(f"{c['id']}: skipped (--no-llm; the compile/repair loop needs a router)")
             continue
+        if not governor.check():
+            print(f"cost ceiling ${args.max_cost:.2f} reached (spent ${governor.spent():.2f}) — stopping, "
+                  f"{len(candidates) - len(forge_results)} candidate(s) not attempted")
+            break
         result = await forge_candidate(
             router, kb, c, Path(c["poc_path"]).read_text(), target, forge_dir,
             max_repairs=args.max_repairs,
@@ -126,10 +133,17 @@ async def run_pocs_command(args) -> int:
     extra_meta = {k: v for k, v in meta.items() if k not in ("judge_mode", "provenance")}
     write_findings(args.run_dir, meta.get("judge_mode", "gate"), meta.get("provenance"), findings_out, **extra_meta)
 
+    manifest.write(
+        Path(args.run_dir) / "manifest.json", "run-pocs",
+        {"run_dir": args.run_dir, "target": target, "max_repairs": args.max_repairs, "no_panel": args.no_panel,
+         "corpus": args.corpus, "max_cost_usd": args.max_cost},
+        router, governor,
+    )
+
     forged = sum(1 for r in forge_results.values() if r.status == "forged")
     killed_by_panel = sum(1 for p in panel_results.values() if p.killed)
     print(
         f"{len(candidates)} candidate(s) with a Foundry PoC, {len(forge_results)} forged-attempted, "
         f"{forged} confirmed forged, {killed_by_panel} killed by the refutation panel"
     )
-    return 0
+    return BUDGET_EXCEEDED_EXIT_CODE if governor.breached else 0

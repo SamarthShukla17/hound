@@ -102,6 +102,15 @@ async def classify(router, role: str, finding: dict, corpus: list) -> NoveltyRes
     except Exception as exc:  # noqa: BLE001
         return NoveltyResult(verdict="unclassified", notes=f"embedding call failed: {exc}")
 
+    # A provider that drops or reorders an embedding in the batch must not silently zip a
+    # vector against the wrong corpus record - treat a count mismatch as a failed comparison,
+    # never as a partial one.
+    if len(vectors) != len(texts):
+        return NoveltyResult(
+            verdict="unclassified",
+            notes=f"embedding count mismatch: sent {len(texts)} texts, got {len(vectors)} vectors back",
+        )
+
     target_vec, corpus_vecs = vectors[0], vectors[1:]
     ranked = sorted(
         (

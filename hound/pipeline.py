@@ -15,6 +15,7 @@ from pathlib import Path
 from .agents import diagnose, hunter, judge, mapper, poc
 from .codebase import build_provenance, check_provenance, chunk, load, rel_path
 from .knowledge import load_kb, poc_refs, select
+from . import manifest as manifestmod
 from .deviation_review import gather_text_for_detection, hunter_notes, resolve_upstream, upstream_diff, write_artifacts
 from . import chain as chainmod
 from . import config_check as cfgchk
@@ -575,6 +576,12 @@ async def _scan(args) -> int:
         print(f"LENSES THAT FAILED (recall holes, not clean negatives): {broken}")
     print(f"wrote {run_dir}")
     print(json.dumps(router.report(), indent=2))
+    manifestmod.write(
+        run_dir / "manifest.json", "scan",
+        {"target": args.target, "kb": args.kb, "lenses": args.lenses, "passes": args.passes,
+         "judge_mode": judge_mode, "scope_profile": scope.name, "models": args.models},
+        router,
+    )
     return 0
 
 
@@ -788,6 +795,12 @@ async def _rejudge(args) -> int:
     print(f"judge verdicts ({judge_mode}): keep={counts['keep']} kill={counts['kill']} needs_poc={counts['needs_poc']}")
     print(f"wrote {run_dir}")
     print(json.dumps(router.report(), indent=2))
+    manifestmod.write(
+        run_dir / "manifest.json", "rejudge",
+        {"run_dir": str(src_dir), "kb": args.kb, "judge_mode": judge_mode, "scope_profile": scope.name,
+         "models": args.models},
+        router,
+    )
     return 0
 
 
@@ -886,4 +899,10 @@ async def _rediagnose(args) -> int:
     print(f"judge verdicts ({judge_mode}): keep={counts['keep']} kill={counts['kill']} needs_poc={counts['needs_poc']}")
     print(f"wrote {run_dir}")
     print(json.dumps(router.report(), indent=2))
+    manifestmod.write(
+        run_dir / "manifest.json", "rediagnose",
+        {"run_dir": str(src_dir), "kb": args.kb, "judge_mode": judge_mode, "scope_profile": scope.name,
+         "models": args.models},
+        router,
+    )
     return 0

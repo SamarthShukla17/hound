@@ -25,7 +25,8 @@ from pydantic import BaseModel, ValidationError, model_validator
 from hound.agents import system
 from hound.llm import OutOfCredits
 
-from .forger import compile, first_test_name, run_test
+from .forger import compile as forge_compile
+from .forger import first_test_name, run_test
 
 # Configure these in models.yaml, same as judge2; a role left unconfigured is simply skipped
 # (router.has(role) is False) and the panel runs on however many of the three are available.
@@ -205,7 +206,7 @@ async def run_panel(
 
         inj_path = forge_dir / f"{fid}_refute_{role}.t.sol"
         inj_path.write_text(injected)
-        ok, err = compile(inj_path, target_root, runner)
+        ok, err = forge_compile(inj_path, target_root, runner)
         if not ok:
             entry["injection"] = f"injected assumption did not compile - unverified: {err[:200]}"
             continue
