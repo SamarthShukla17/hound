@@ -176,6 +176,11 @@ def test_scan_end_to_end_against_mock_server(fixture_repo, kb_dir, tmp_path, mon
         assert len(poc_files) == 1
         assert "// ASSUME:" in poc_files[0].read_text()
 
+        manifest = json.loads((out_dir / "manifest.json").read_text())
+        assert manifest["command"] == "scan"
+        assert manifest["cost_report"]["total_usd"] >= 0
+        assert manifest["args"]["target"] == str(fixture_repo)
+
 
 def test_rerun_resumes_entirely_from_the_disk_cache(fixture_repo, kb_dir, tmp_path, monkeypatch):
     """If a scan dies on rate limits, a rerun must not re-spend requests: the cache
@@ -483,6 +488,30 @@ def test_rejudge_reruns_only_the_judge_stage_and_writes_a_new_run_dir(fixture_re
     # the deterministic gate kill is carried over untouched, not re-judged
     hard = [f for f in after["findings"] if f["hard_kill"]]
     assert [f["verdict"]["killed_by"] for f in hard] == [CITATION_GATE]
+
+    manifest = json.loads((out_dirs[0] / "manifest.json").read_text())
+    assert manifest["command"] == "rejudge" and manifest["args"]["scope_profile"] == "bounty"
+
+
+def test_rediagnose_also_writes_a_manifest(fixture_repo, kb_dir, tmp_path, monkeypatch):
+    import argparse
+    import asyncio
+
+    with MockServer() as mock:
+        src_dir, _ = _run_scan(fixture_repo, kb_dir, tmp_path, monkeypatch, mock)
+        args = argparse.Namespace(
+            run_dir=str(src_dir), kb=str(Path(__file__).parent.parent / "kb"), known=None, notes=None,
+            scope_profile="bounty", scope_rules=None, judge_mode="advisory", judge_budget=120_000,
+            map_cap=12_000, max_judge=40, no_judge2=False, fresh=True, out=str(tmp_path / "diagnosed"),
+            models=str(tmp_path / "models.yaml"), local_only=False, cache_any_model=None,
+        )
+        assert asyncio.run(rediagnose(args)) == 0
+
+    out_dirs = list((tmp_path / "diagnosed").iterdir())
+    assert len(out_dirs) == 1 and out_dirs[0].name.endswith("-diagnosed")
+    manifest = json.loads((out_dirs[0] / "manifest.json").read_text())
+    assert manifest["command"] == "rediagnose" and manifest["args"]["scope_profile"] == "bounty"
+    assert manifest["cost_report"]["total_usd"] >= 0
 
 
 def test_rejudge_refuses_when_the_code_changed_since_the_hunter_read_it(fixture_repo, kb_dir, tmp_path, monkeypatch, capsys):
